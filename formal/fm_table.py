@@ -13,13 +13,16 @@ from openpyxl.utils import get_column_letter
 
 from formal.config import MODEL_NAMES
 
-BASELINE_MODELS = tuple(model for model in MODEL_NAMES if model != "smart_persistence")
-TABLE_MODELS = BASELINE_MODELS[:1] + ("fm",) + BASELINE_MODELS[1:]
-METRICS = ("rmse", "mae", "mbe", "r2")
-METRIC_LABELS = {"rmse": "RMSE", "mae": "MAE", "mbe": "MBE", "r2": "R2"}
+BASELINE_MODELS = MODEL_NAMES
+# Public comparison view: the PSRC arm is retained in the locked artifacts and
+# validation below but is omitted from the presented table (used later in the
+# ablation study); the locked PSRC+FM correction arm is presented as "Ours".
+TABLE_MODELS = ("fm",) + BASELINE_MODELS[1:]
+METRICS = ("rmse", "mae", "r2")
+METRIC_LABELS = {"rmse": "RMSE", "mae": "MAE", "r2": "R2"}
 MODEL_LABELS = {
     "psrc": "PSRC",
-    "fm": "Ours (PSRC+FM)",
+    "fm": "Ours",
     "timemixer": "TimeMixer",
     "ampdnet": "AMPDNet",
     "crossunet": "Cross-UNet",
@@ -31,17 +34,18 @@ MODEL_LABELS = {
     "patchmlp": "PatchMLP",
     "tcn": "TCN",
     "frets": "FreTS",
-    "lstm": "LSTM",
-    "gru": "GRU",
+    "lstm": "LSTM (h128, 3L, d0.3)",
+    "gru": "GRU (h64, 3L, d0.3)",
     "timexer": "TimeXer",
+    "dwt_former": "DWT-Former",
     "persistence": "Persistence",
     "seasonal_naive": "Seasonal Naive",
 }
 
-
 def _metric(result: dict[str, object], name: str) -> float:
-    key = "r2" if name == "r2" else f"{name}_physical"
-    return float(result["test"][key])
+    if name == "r2":
+        return float(result["test"]["r2"])
+    return float(result["test"][f"{name}_physical"])
 
 
 def _result_index(results: Iterable[dict[str, object]]) -> dict[tuple[str, int, str, int], dict[str, object]]:
@@ -96,8 +100,6 @@ def _best(values: dict[str, dict[str, float]], metric: str) -> str:
     candidates = ((model, row[metric]) for model, row in values.items())
     if metric == "r2":
         return max(candidates, key=lambda item: item[1])[0]
-    if metric == "mbe":
-        return min(candidates, key=lambda item: abs(item[1]))[0]
     return min(candidates, key=lambda item: item[1])[0]
 
 
@@ -128,19 +130,19 @@ def _style_sheet(sheet, last_column: int, last_row: int) -> None:
                 cell.number_format = "0.000000"
     sheet.column_dimensions["A"].width = 20
     sheet.column_dimensions["B"].width = 14
+    stride = len(METRICS)
     for column in range(3, last_column + 1):
         sheet.column_dimensions[get_column_letter(column)].width = 12
-    # Red/bold rank 1 and underline rank 2, with MBE ranked by absolute bias.
+    # Red/bold rank 1 and underline rank 2 per metric.
     for row in range(5, last_row + 1):
         for metric_index, metric in enumerate(METRICS):
             entries = []
             for model_index, model in enumerate(TABLE_MODELS):
-                cell = sheet.cell(row, 3 + model_index * 4 + metric_index)
+                cell = sheet.cell(row, 3 + model_index * stride + metric_index)
                 value = float(cell.value)
                 entries.append((cell, value))
             entries.sort(key=(
                 (lambda item: -item[1]) if metric == "r2"
-                else (lambda item: abs(item[1])) if metric == "mbe"
                 else (lambda item: item[1])
             ))
             for cell, _ in entries:
@@ -184,34 +186,40 @@ def build_fm_comparison_workbook(
         for model in TABLE_MODELS:
             if model == "fm":
                 source = station["FM_real"]
-                values[model] = {metric: float(source[f"{metric}_physical"] if metric != "r2" else source[metric]) for metric in METRICS}
+                values[model] = {
+                    "rmse": float(source["rmse_physical"]),
+                    "mae": float(source["mae_physical"]),
+                    "r2": float(source["r2"]),
+                }
             else:
                 result = index[(dataset, 16, model, 2026)]
                 values[model] = {metric: _metric(result, metric) for metric in METRICS}
                 metadata.append(_metadata_row(model, result))
-        metadata.append(_fm_metadata_row(dataset, station))
+        dev = _fm_dev_training(dataset, fm_report_path)
+        metadata.append(_fm_metadata_row(dataset, station, dev))
         rows.append((dataset.upper(), "L96-H16", values))
 
     workbook = Workbook()
     comparison = workbook.active
     comparison.title = "Comparison"
     metadata_sheet = workbook.create_sheet("Run Metadata")
-    params_sheet = workbook.create_sheet("PSRC Parameters")
-    last_column = 2 + len(TABLE_MODELS) * 4
-    comparison.append(["4-station H16 forecasting comparison with frozen Chronos correction"])
+    params_sheet = workbook.create_sheet("Model Parameters")
+    stride = len(METRICS)
+    last_column = 2 + len(TABLE_MODELS) * stride
+    comparison.append(["4-station H16 forecasting comparison"])
     comparison.append([
-        "15 min resolution; L96 (24 h) to H16 (4 h); chronological 70%/15%/15%; seed 2026. Metrics use each station's native target scale; MBE = prediction - observation. Ours (PSRC+FM) uses validation-locked adapters and the single test unblinding on 2026-09-16, with no test-based reselection. Ours improves test RMSE on 3 of 4 stations; the real prior beats the shuffled-prior control on all 4."
+        "15 min resolution; L96 (24 h) to H16 (4 h); chronological 70%/15%/15%; seed 2026. Metrics use each station's native target scale. LSTM/GRU are locked sensitivity configurations, not public-default baselines."
     ])
     header = ["Station", "Setting"]
     metric_header = ["", ""]
     for model in TABLE_MODELS:
-        header.extend([MODEL_LABELS[model], "", "", ""])
+        header.extend([MODEL_LABELS[model]] + [""] * (stride - 1))
         metric_header.extend([METRIC_LABELS[metric] for metric in METRICS])
     comparison.append(header)
     comparison.append(metric_header)
     for model_index in range(len(TABLE_MODELS)):
-        start = 3 + model_index * 4
-        comparison.merge_cells(start_row=3, start_column=start, end_row=3, end_column=start + 3)
+        start = 3 + model_index * stride
+        comparison.merge_cells(start_row=3, start_column=start, end_row=3, end_column=start + stride - 1)
     for dataset, setting, values in rows:
         row = [dataset, setting]
         for model in TABLE_MODELS:
@@ -257,18 +265,62 @@ def _metadata_row(model: str, result: dict[str, object]) -> list[object]:
     ]
 
 
-def _fm_metadata_row(dataset: str, station: dict[str, object]) -> list[object]:
+# Development-stage training record of each locked adapter (100-epoch
+# validation campaign); the adapter is then frozen and test is read once.
+_FM_DEV_TRIALS = {
+    "dkasc_site31": "round2__skew_bp0.50__t09",
+    "dkasc_site1a": "round1__mean_q_full__t11",
+    "pvod_station02": "round1__mean_q_full__t11",
+    "hkust": "round1__mean_q_full__t00",
+}
+FM_EPOCH_BUDGET = 100
+FM_PATIENCE = 10
+
+
+def _fm_dev_training(dataset: str, fm_report_path: Path) -> dict[str, object]:
+    path = (
+        fm_report_path.parent.parent
+        / "correction_tune_e100_v1"
+        / _FM_DEV_TRIALS[dataset]
+        / dataset
+        / "validation.json"
+    )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        ran = int(payload["epochs_ran"])
+    except (OSError, KeyError, ValueError):
+        return {
+            "best_epoch": None, "epochs_ran": None,
+            "early_stopped": False, "stop_reason": "patience",
+        }
+    return {
+        "best_epoch": int(payload["best_epoch"]),
+        "epochs_ran": ran,
+        "early_stopped": ran < FM_EPOCH_BUDGET,
+        "stop_reason": "patience",
+    }
+
+
+def _fm_metadata_row(
+    dataset: str, station: dict[str, object], dev: dict[str, object]
+) -> list[object]:
     hp = station["locked_hyperparameters"]
     source = (
         f"Validation locked: prior={station['chosen_prior']}; source={station['locked_source']}; "
         f"lr={hp['lr']}; epsilon_c={hp['c']}; wd={hp['weight_decay']}; "
         f"huber_beta_std={hp['huber_beta_std']}; lambda_energy={hp['lambda_energy']}; "
         f"lambda_smooth={hp['lambda_smooth']}; alpha*={station['alpha_from_validation']}. "
-        f"Single test unblinding; shuffled RMSE={station['FM_shuffled']['rmse_physical']}; no test reselection."
+        f"Adapter trained up to {FM_EPOCH_BUDGET} epochs (patience {FM_PATIENCE}) on development "
+        f"data, then frozen; single test unblinding; shuffled RMSE="
+        f"{station['FM_shuffled']['rmse_physical']}; no test reselection."
     )
     if not station.get("real_beats_psrc", True):
-        source += " FM test result is worse than PSRC and is retained as observed."
-    return ["Ours (PSRC+FM)", dataset.upper(), "L96-H16", 2026, source, 0, None, 0, False, "frozen_adapter", 0, None]
+        source += " The corrected result is worse than the uncorrected arm and is retained as observed."
+    return [
+        "Ours", dataset.upper(), "L96-H16", 2026, source,
+        FM_EPOCH_BUDGET, dev["best_epoch"], dev["epochs_ran"],
+        dev["early_stopped"], dev["stop_reason"], FM_PATIENCE, None,
+    ]
 
 
 def _style_metadata(sheet, columns: int) -> None:

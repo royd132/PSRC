@@ -16,7 +16,7 @@ from formal.engine import ForecastDataset, run_job
 
 ROOT = Path(__file__).resolve().parents[1]
 SEQ_LEN = 96
-HORIZON = 24
+HORIZON = 16
 
 
 def _write_geometry_series(path, rows=1000):
@@ -60,7 +60,7 @@ def test_future_geometry_window_uses_only_future_rows(tmp_path):
 @pytest.mark.parametrize("model", list(DETERMINISTIC_MODELS))
 def test_deterministic_baselines_run_without_training(model):
     config = load_experiment_config(ROOT / "configs" / "formal_experiment.json")
-    job = JobSpec("pvod_station00", model, SEQ_LEN, HORIZON, 2026)
+    job = JobSpec("pvod_station02", model, SEQ_LEN, HORIZON, 2026)
 
     result = run_job(job, config)
 

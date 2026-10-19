@@ -19,6 +19,7 @@ ALL_ARMS = (
     frozenset({"equal_gl_fusion"}),
     frozenset({"no_spectral"}),
     frozenset({"equal_tf_fusion"}),
+    frozenset({"no_corpatch"}),
     frozenset({"numerical_backbone"}),
     frozenset({"numeric_residual"}),
     frozenset({"no_gate"}),
@@ -121,6 +122,48 @@ def test_no_spectral_bypasses_spectral_branch_and_tf_router():
     assert calls == {"spectral": 0, "router": 0}
     # GTR and L-Drive still feed the temporal path.
     assert calls["spectral"] == 0
+
+
+def test_no_corpatch_collapses_to_single_scale_basic_patch():
+    model = _build(frozenset({"no_corpatch"}))
+    calls = {"var_attn": 0, "state_router": 0, "scale_router": 0, "mixer0": 0,
+             "mixer1": 0}
+    for module in model.corpatch.variable_attentions:
+        module.register_forward_hook(
+            lambda *a: calls.__setitem__("var_attn", calls["var_attn"] + 1)
+        )
+    model.corpatch.state_router.register_forward_hook(
+        lambda *a: calls.__setitem__("state_router", calls["state_router"] + 1)
+    )
+    model.corpatch.variable_scale_router.register_forward_hook(
+        lambda *a: calls.__setitem__("scale_router", calls["scale_router"] + 1)
+    )
+    model.corpatch.temporal_mixers[0].register_forward_hook(
+        lambda *a: calls.__setitem__("mixer0", calls["mixer0"] + 1)
+    )
+    model.corpatch.temporal_mixers[1].register_forward_hook(
+        lambda *a: calls.__setitem__("mixer1", calls["mixer1"] + 1)
+    )
+    x, cycle = _inputs()
+    with torch.no_grad():
+        y_abl = model(x, cycle, None, None, None)
+    # Cross-variable attention and both scale routers are bypassed; only the
+    # base-scale temporal mixer runs.
+    assert calls["var_attn"] == 0
+    assert calls["state_router"] == 0
+    assert calls["scale_router"] == 0
+    assert calls["mixer0"] == 1
+    assert calls["mixer1"] == 0
+    assert y_abl.shape == (BATCH, HORIZON, 1)
+    # The full model is numerically different on this fixed random input.
+    full = _build(frozenset())
+    with torch.no_grad():
+        y_full = full(x, cycle, None, None, None)
+    assert not torch.allclose(y_abl, y_full)
+    # Parameter count is unchanged: every CorPatch submodule is still built.
+    n_abl = sum(p.numel() for p in model.parameters())
+    n_full = sum(p.numel() for p in full.parameters())
+    assert n_abl == n_full
 
 
 def test_no_gate_forces_confidence_gate_to_exactly_one():

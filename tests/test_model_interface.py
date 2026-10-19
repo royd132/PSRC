@@ -17,9 +17,6 @@ FEATURE_NAMES = [
     "ClearSkyGHIProxy",
     "Target",
 ]
-CLEAR_SKY_INDEX = FEATURE_NAMES.index("ClearSkyGHIProxy")
-
-
 def _base_config():
     return SimpleNamespace(
         seq_len=96,
@@ -46,18 +43,6 @@ def _config_for(name):
             "token_scale": [[1.0] * TOKEN_WIDTH for _ in range(N_TOKENS)],
             "d_token": 16,
             "use_gate": True,
-        }
-    if name == "smart_persistence":
-        config.solar_geometry = {
-            "clear_sky_index": CLEAR_SKY_INDEX,
-            "clear_future_pos": 0,
-            "daylight_future_pos": None,
-            "target_mu": 0.0,
-            "target_sd": 1.0,
-            "clear_mu": 0.5,
-            "clear_sd": 0.4,
-            "clear_sky_training_max": 1.0,
-            "capacity": 1.0,
         }
     return config
 
@@ -90,8 +75,3 @@ def test_factory_registers_exactly_the_locked_model_set():
 def test_factory_rejects_unknown_model():
     with pytest.raises(KeyError, match="unknown model"):
         build_model("not_a_model", _base_config())
-
-
-def test_smart_persistence_requires_geometry_config():
-    with pytest.raises(ValueError, match="clear-sky geometry"):
-        build_model("smart_persistence", _base_config())

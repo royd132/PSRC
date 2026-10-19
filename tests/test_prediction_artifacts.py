@@ -23,7 +23,7 @@ from formal.runner import should_skip
 
 ROOT = Path(__file__).resolve().parents[1]
 SEQ_LEN = 96
-HORIZON = 24
+HORIZON = 16
 
 DUMP_KEYS = ("y", "yhat0", "yhat_psrc", "delta", "gate", "window_start")
 
@@ -59,7 +59,7 @@ class _FakePSRC(nn.Module):
 
 def test_deterministic_run_persists_dump_without_checkpoint(tmp_path):
     config = load_experiment_config(ROOT / "configs" / "formal_experiment.json")
-    job = JobSpec("pvod_station00", "persistence", SEQ_LEN, HORIZON, 2026)
+    job = JobSpec("pvod_station02", "persistence", SEQ_LEN, HORIZON, 2026)
     artifacts = tmp_path / "pvod_persistence"
 
     result = run_job(job, config, artifacts_dir=artifacts)
@@ -85,7 +85,7 @@ def test_deterministic_run_persists_dump_without_checkpoint(tmp_path):
 
 def test_run_without_artifacts_dir_has_no_artifact_fields():
     config = load_experiment_config(ROOT / "configs" / "formal_experiment.json")
-    job = JobSpec("pvod_station00", "persistence", SEQ_LEN, HORIZON, 2026)
+    job = JobSpec("pvod_station02", "persistence", SEQ_LEN, HORIZON, 2026)
 
     result = run_job(job, config)
 

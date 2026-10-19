@@ -1,10 +1,10 @@
-"""LSTM baseline, public implementation from
+"""LSTM baseline adapted from
 
 https://github.com/laowu-code/TimeFrequency_EndogenousExogenousDecoupling_PVPowerForecast
 (models/LSTM.py), exposed through the local shared forecasting interface.
 
-Public single configuration (pre_deterministic_solar.py):
-d_model=128, e_layers=1.
+The locked experiment configuration is declared in
+``configs/formal_experiment.json``.
 """
 
 import torch
@@ -23,6 +23,7 @@ class LSTM(nn.Module):
         seq_len=None,
         bidirectional=False,
         prob=False,
+        dropout=0.0,
     ):
         super(LSTM, self).__init__()
         self.input_size = enc_in
@@ -37,6 +38,7 @@ class LSTM(nn.Module):
             num_layers=self.num_layers,
             batch_first=True,
             bidirectional=bidirectional,
+            dropout=dropout if e_layers > 1 else 0.0,
         )
         if not self.prob:
             self.fc = nn.Linear(self.hidden_size, self.output_size)
@@ -61,6 +63,7 @@ class Model(nn.Module):
             e_layers=int(getattr(configs, "lstm_layers", 1)),
             pred_len=configs.pred_len,
             seq_len=configs.seq_len,
+            dropout=float(getattr(configs, "lstm_dropout", 0.0)),
         )
 
     def forward(self, x_enc, x_mark_enc=None, x_dec=None, x_mark_dec=None, mask=None):

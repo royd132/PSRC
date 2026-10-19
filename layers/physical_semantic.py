@@ -191,9 +191,25 @@ def compute_physical_tokens(
     return tokens
 
 
+@torch.no_grad()
+def compute_generic_tokens(x_std: torch.Tensor) -> torch.Tensor:
+    """Six chronological blocks, each with six channel-averaged statistics."""
+    tokens = []
+    for block in torch.tensor_split(x_std, 6, dim=1):
+        time = torch.linspace(-1, 1, block.shape[1], device=block.device)
+        slope = (block * time[None, :, None]).mean(1) / time.square().mean()
+        tokens.append(torch.stack([
+            block.mean(1).mean(-1), block.std(1, correction=0).mean(-1),
+            block.amin(1).mean(-1), block.amax(1).mean(-1),
+            block[:, -1].mean(-1), slope.mean(-1),
+        ], dim=-1))
+    return torch.stack(tokens, dim=1)
+
+
 def physical_token_statistics(
     x_std, starts, seq_len: int, roles, feature_mu, feature_sd,
     target_mu: float, target_sd: float, chunk_size: int = 512,
+    token_statistics: str = "physical",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Training-window mean and rms scale of every token channel.
 
@@ -212,7 +228,7 @@ def physical_token_statistics(
         )
         index = chunk[:, None] + offset[None, :]
         windows = x[index]
-        tokens = compute_physical_tokens(
+        tokens = compute_generic_tokens(windows) if token_statistics == "generic" else compute_physical_tokens(
             windows, roles, feature_mu, feature_sd, target_mu, target_sd,
         )
         total += tokens.double().sum(dim=0)
@@ -243,11 +259,32 @@ class PhysicalSemanticEncoder(nn.Module):
         token_scale,
         d_token: int = 32,
         dropout: float = 0.0,
+        token_drop: int | None = None,
+        token_mode: str = "real",
+        token_statistics: str = "physical",
+        regroup_seed: int | None = None,
     ) -> None:
         super().__init__()
+        if token_mode not in ("real", "shuffle", "random"):
+            raise ValueError(f"unknown token_mode {token_mode!r}")
+        if token_drop is not None and not 0 <= int(token_drop) < N_TOKENS:
+            raise ValueError("token_drop must index one of the six categories")
         self.roles = dict(roles)
         self.target_mu = float(target_mu)
         self.target_sd = float(target_sd)
+        self.token_drop = None if token_drop is None else int(token_drop)
+        self.token_mode = str(token_mode)
+        if token_statistics not in ("physical", "generic"):
+            raise ValueError("unknown token statistics")
+        self.token_statistics = token_statistics
+        self.regroup_seed = regroup_seed
+        order = torch.arange(36)
+        if regroup_seed is not None:
+            order = torch.randperm(36, generator=torch.Generator().manual_seed(regroup_seed))
+        self.register_buffer("regroup_order", order, persistent=False)
+        # Supplementary negative controls (shuffle/random) use a private RNG
+        # stream so the global dropout stream stays identical across arms.
+        self._perm_counter = 0
         self.register_buffer(
             "feature_mu", torch.as_tensor(feature_mu, dtype=torch.float32),
         )
@@ -274,10 +311,46 @@ class PhysicalSemanticEncoder(nn.Module):
             nn.Linear(d_token, d_token),
         )
 
-    def forward(self, x_enc: torch.Tensor) -> torch.Tensor:
-        raw = compute_physical_tokens(
+    def standardized_tokens(self, x_enc: torch.Tensor) -> torch.Tensor:
+        """Fixed causal token transform followed by training normalization."""
+        raw = compute_generic_tokens(x_enc) if self.token_statistics == "generic" else compute_physical_tokens(
             x_enc, self.roles, self.feature_mu, self.feature_sd,
             self.target_mu, self.target_sd,
         )
-        tokens = (raw - self.token_mean) / self.token_scale
-        return self.projection(tokens)
+        normalized = (raw - self.token_mean) / self.token_scale
+        if self.regroup_seed is not None:
+            normalized = normalized.flatten(1)[:, self.regroup_order].reshape(-1, 6, 6)
+        return normalized
+
+    def _permuted(self, projected: torch.Tensor) -> torch.Tensor:
+        batch = projected.shape[0]
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(2026 + self._perm_counter)
+        self._perm_counter += 1
+        if self.token_mode == "shuffle":
+            # Permute whole token sets across windows: the joint distribution
+            # of physical states is preserved, only window correspondence is
+            # destroyed.
+            perm = torch.randperm(batch, generator=generator)
+            return projected[perm.to(projected.device)]
+        # "random": independently permute every projected coordinate across
+        # the batch. Each coordinate's empirical marginal is preserved while
+        # all within-window and cross-coordinate structure is destroyed.
+        out = torch.empty_like(projected)
+        for idx in range(projected.shape[1]):
+            for col in range(projected.shape[2]):
+                perm = torch.randperm(batch, generator=generator)
+                out[:, idx, col] = projected[perm.to(projected.device), idx, col]
+        return out
+
+    def forward(self, x_enc: torch.Tensor) -> torch.Tensor:
+        tokens = self.standardized_tokens(x_enc)
+        if self.token_drop is not None:
+            # Zero after standardization == impute this category with its
+            # training-window mean; the projection sees an identical layout.
+            tokens = tokens.clone()
+            tokens[:, self.token_drop, :] = 0.0
+        projected = self.projection(tokens)
+        if self.token_mode != "real":
+            projected = self._permuted(projected)
+        return projected

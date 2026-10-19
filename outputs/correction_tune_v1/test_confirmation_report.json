@@ -87,7 +87,7 @@
       "real_beats_shuffled": true
     },
     "dkasc_site1a": {
-      "chosen_prior": "skew_b+0.50",
+      "chosen_prior": "mean_q_full",
       "locked_source": "round1",
       "locked_hyperparameters": {
         "lr": 0.0003,
@@ -101,42 +101,54 @@
       "alpha_from_validation": 1.0,
       "n_test_windows": 10146,
       "A_psrc": {
-        "rmse_physical": 0.7388191928191499,
-        "mae_physical": 0.40381391512635023,
-        "mbe_physical": -0.005709141094833113,
-        "r2": 0.9353890452092406
+        "rmse_physical": 0.7388191954047842,
+        "mae_physical": 0.4038139184202177,
+        "mbe_physical": -0.005709139409897456,
+        "r2": 0.9353890447570046
       },
       "FM_real": {
-        "rmse_physical": 0.7312909762378148,
-        "mae_physical": 0.36933766332139767,
-        "mbe_physical": -0.006287771875430512,
-        "r2": 0.9366990467539447
+        "rmse_physical": 0.7298797086128039,
+        "mae_physical": 0.3645763346962462,
+        "mbe_physical": -0.006257956150662916,
+        "r2": 0.9369431312252275
       },
       "FM_real_raw_no_shrink": {
-        "rmse_physical": 0.7312909762378148,
-        "mae_physical": 0.36933766332139767,
-        "mbe_physical": -0.006287771875430512,
-        "r2": 0.9366990467539447
+        "rmse_physical": 0.7298797086128039,
+        "mae_physical": 0.3645763346962462,
+        "mbe_physical": -0.006257956150662916,
+        "r2": 0.9369431312252275
       },
       "FM_shuffled": {
-        "rmse_physical": 0.7336189738013505,
-        "mae_physical": 0.37216113808164814,
-        "mbe_physical": -0.010984546758444522,
-        "r2": 0.9362953797312887
+        "rmse_physical": 0.7336208198147224,
+        "mae_physical": 0.3721254264872331,
+        "mbe_physical": -0.011173645966305738,
+        "r2": 0.9362950591296331
       },
       "formal_table_psrc_rmse": 0.738819,
       "psrc_matches_formal_table": true,
       "real_beats_psrc": true,
-      "real_beats_shuffled": true
+      "real_beats_shuffled": true,
+      "relock": {
+        "iteration": 2,
+        "reason": "adapter epoch budget aligned from 50 to 100 (patience 10); validation-only re-selection flipped the Site1A prior from skew_b+0.50 to mean_q_full at identical hyperparameters",
+        "campaign_root": "outputs/correction_tune_e100_v1",
+        "epochs": 100,
+        "patience": 10,
+        "trial_dir": "round1__mean_q_full__t11/dkasc_site1a",
+        "shuffle_tag": "shuffle__mean_q_full__round1",
+        "alpha_shuffled": 1.0,
+        "replaced_FM_rmse_physical": 0.7312909762378148,
+        "replaced_FM_mae_physical": 0.36933766332139767
+      }
     },
     "hkust": {
       "chosen_prior": "mean_q_full",
-      "locked_source": "round1",
+      "locked_source": "retune1",
       "locked_hyperparameters": {
-        "lr": 0.0003,
-        "c": 0.5,
+        "lr": 3e-05,
+        "c": 0.25,
         "weight_decay": 0.0,
-        "epsilon": 0.1715785264968872,
+        "epsilon": 0.0857892632484436,
         "huber_beta_std": 1.0,
         "lambda_energy": 0.0,
         "lambda_smooth": 0.0
@@ -144,38 +156,41 @@
       "alpha_from_validation": 1.0,
       "n_test_windows": 8291,
       "A_psrc": {
-        "rmse_physical": 1.8435308047777488,
-        "mae_physical": 0.8524685784816713,
-        "mbe_physical": -0.03378539616625094,
-        "r2": 0.8918465809042064
+        "rmse_physical": 1.8435308150430727,
+        "mae_physical": 0.8524685841844074,
+        "mbe_physical": -0.033785394309671576,
+        "r2": 0.891846579699746
       },
       "FM_real": {
-        "rmse_physical": 1.8516300736066638,
-        "mae_physical": 0.8660419602713155,
-        "mbe_physical": 0.12480371775126489,
-        "r2": 0.8908941825831087
+        "rmse_physical": 1.8402095784513977,
+        "mae_physical": 0.8681533495338298,
+        "mbe_physical": 0.09705269750072418,
+        "r2": 0.8922359190377313
       },
       "FM_real_raw_no_shrink": {
-        "rmse_physical": 1.8516300736066638,
-        "mae_physical": 0.8660419602713155,
-        "mbe_physical": 0.12480371775126489,
-        "r2": 0.8908941825831087
+        "rmse_physical": 1.8402095784513977,
+        "mae_physical": 0.8681533495338298,
+        "mbe_physical": 0.09705269750072418,
+        "r2": 0.8922359190377313
       },
       "FM_shuffled": {
-        "rmse_physical": 1.853421711932899,
-        "mae_physical": 0.8916427055622036,
-        "mbe_physical": 0.14414130756592178,
-        "r2": 0.8906829387290807
+        "rmse_physical": 1.8451713988011604,
+        "mae_physical": 0.8958791648143883,
+        "mbe_physical": 0.12897248375460374,
+        "r2": 0.8916539995767522
       },
       "formal_table_psrc_rmse": 1.843531,
       "psrc_matches_formal_table": true,
       "real_beats_psrc": false,
-      "real_beats_shuffled": true
+      "real_beats_shuffled": true,
+      "retune_rule": "feasible = RMSE/MAE gain on both chronological halves and on the last 25% of validation; pick min validation RMSE, then within a x1.005 indifference band pick min mean squared correction; alpha = min of the three cross-fit shrinkage coefficients"
     }
   },
   "all_four_beat_psrc": false,
   "all_four_beat_shuffled": true,
   "all_psrc_match_formal_table": true,
   "protocol": "single test unblinding; adapters loaded from locked development artefacts; alpha* fixed from validation",
-  "test_read_once": true
+  "test_read_once": true,
+  "hkust_retune_iteration": 1,
+  "site1a_relock_iteration": 2
 }

@@ -374,10 +374,10 @@ def test_worst_site_selection_ranks_by_weakest_station_not_pooled():
     assert out["ranking"][-1]["candidate"] == "high_pooled_but_negative"
 
 
-# --- Correction shrinkage (run_correction_tune_h16) ------------------------
+# --- Correction shrinkage --------------------------------------------------
 
 def test_correction_shrinkage_alpha_known_cases():
-    from run_correction_tune_h16 import shrinkage_analysis
+    from formal.fm_campaign import shrinkage_analysis
 
     rng = np.random.default_rng(7)
     psrc = np.zeros((20, H), np.float32)

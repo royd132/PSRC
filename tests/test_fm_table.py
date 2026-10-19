@@ -4,11 +4,11 @@ import pytest
 from openpyxl import load_workbook
 
 from formal.config import MODEL_NAMES
-from formal.fm_table import build_fm_comparison_workbook
+from formal.fm_table import TABLE_MODELS, build_fm_comparison_workbook
 
 
 DATASETS = ("dkasc_site31", "dkasc_site1a", "pvod_station02", "hkust")
-MODELS = tuple(model for model in MODEL_NAMES if model != "smart_persistence")
+MODELS = MODEL_NAMES
 
 
 def _result(dataset, model, rmse):
@@ -78,12 +78,24 @@ def test_fm_table_builds_locked_18_method_workbook(tmp_path):
 
     workbook = load_workbook(output, data_only=True)
     comparison = workbook["Comparison"]
-    assert comparison.max_column == 2 + 18 * 4
-    assert comparison["G3"].value == "Ours (PSRC+FM)"
-    assert comparison["G5"].value == pytest.approx(0.9)
-    assert comparison["G5"].font.bold is True
-    assert comparison["G5"].font.color.rgb.endswith("C00000")
+    # Ours + 17 public baselines (PSRC arm omitted from the presented table);
+    # three metrics per model: RMSE / MAE / R2.
+    assert comparison.max_column == 2 + 18 * 3
+    assert comparison["C3"].value == "Ours"
+    assert comparison["C4"].value == "RMSE"
+    assert comparison["D4"].value == "MAE"
+    assert comparison["E4"].value == "R2"
+    assert "PSRC" not in [
+        cell.value for row in comparison.iter_rows(min_row=3, max_row=4) for cell in row
+    ]
+    # PSRC synthetic RMSE is 1.0; Ours is 0.1 better at site 31.
+    assert comparison["C5"].value == pytest.approx(0.9)
+    assert comparison["C5"].font.bold is True
+    assert comparison["C5"].font.color.rgb.endswith("C00000")
+    # First public baseline (TimeMixer) starts at column F.
+    assert comparison["F5"].value == pytest.approx(1.1)
     assert workbook["Run Metadata"].max_row == 1 + 4 * 18
+    assert "Model Parameters" in workbook.sheetnames
 
 
 def test_fm_table_rejects_psrc_mismatch(tmp_path):

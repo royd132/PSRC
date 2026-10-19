@@ -36,16 +36,17 @@ def test_model_and_layer_surface_is_locked():
         "factory.py",
         "itransformer.py",
         "ours.py",
+        "physical_language.py",
         "patchmlp.py",
         "patchtst.py",
         "persistence.py",
         "seasonal_naive.py",
-        "smart_persistence.py",
         "tcn.py",
         "frets.py",
         "lstm.py",
         "gru.py",
         "timexer.py",
+        "dwt_former.py",
         "timemixer.py",
         "timesnet.py",
     }
@@ -80,3 +81,10 @@ def test_exploratory_tools_are_removed():
     assert not (ROOT / "tools").exists()
     assert not (ROOT / "tools_bench_amp.py").exists()
     assert not (ROOT / "formal" / "lr_fix_pvod00.py").exists()
+    assert not list((ROOT / "analysis").glob("*.py"))
+    assert not (ROOT / "configs" / "formal_experiment_h24.json").exists()
+    assert not (ROOT / "run_rnn_config_ablation.py").exists()
+
+
+def test_root_has_one_experiment_entrypoint():
+    assert {path.name for path in ROOT.glob("run_*.py")} == {"run_experiment.py"}

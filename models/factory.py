@@ -19,9 +19,9 @@ _MODULES = {
     "lstm": "lstm",
     "gru": "gru",
     "timexer": "timexer",
+    "dwt_former": "dwt_former",
     "persistence": "persistence",
     "seasonal_naive": "seasonal_naive",
-    "smart_persistence": "smart_persistence",
 }
 
 _DEFAULTS = {

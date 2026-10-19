@@ -30,8 +30,9 @@ default to the exact previous behaviour).
 Final control: same locked hyperparameters with the Chronos prior
 permuted across windows (fixed seed) - RMSE_real must beat RMSE_shuffled.
 
-Stages: --step0 / --round1 / --round2 / --shuffle-control.
-Test windows are never read.
+Development stages ``--step0`` / ``--round1`` / ``--round2`` /
+``--shuffle-control`` never read test windows. ``--test-confirm`` performs
+the explicit locked evaluation after development is complete.
 """
 
 from __future__ import annotations
@@ -48,14 +49,20 @@ import torch
 from formal.chronos_prior import (
     CHRONOS2_QUANTILES,
     build_chronos2_grid_cache,
+    contract_prior,
     load_grid_cache,
     prior_cache_path_v4,
+    readout,
+    scale_disagreement,
+    scale_disagreement_segments,
+    skew_readout,
 )
 from formal.config import (
     JobSpec,
     load_best_parameters,
     load_experiment_config,
 )
+from formal.data import load_dataset
 from formal.engine import (
     _evaluate,
     _loader,
@@ -73,19 +80,12 @@ from formal.pc_fra import (
     window_scalar_features,
 )
 
-import run_chronos_l96_calibration as calib
-import run_chronos_prior_tuning_h16 as prev
-
-SEQ_LEN = calib.SEQ_LEN
-HORIZON = calib.HORIZON
-SEED = calib.SEED
-SHUFFLE_SEED = calib.SHUFFLE_SEED
-HIDDEN = calib.HIDDEN
-DROPOUT = calib.DROPOUT
-EPOCHS = calib.EPOCHS
-PATIENCE = calib.PATIENCE
-
-STATIONS = calib.ALL_STATIONS  # 31, 02, 1A, HKUST
+SEQ_LEN, HORIZON, SEED = 96, 16, 2026
+SHUFFLE_SEED = 2026
+HIDDEN, DROPOUT = 96, 0.1
+EPOCHS, PATIENCE = 50, 10
+ADAPTER_LR, ADAPTER_WD = 1e-3, 0.0
+STATIONS = ("dkasc_site31", "pvod_station02", "dkasc_site1a", "hkust")
 ROOT = Path("outputs/correction_tune_v1")
 LOCKED_CONTEXT = 96
 LOCKED_NORM = "raw"
@@ -118,6 +118,64 @@ ROUND1_GRID: tuple[tuple[float, float, float], ...] = (
 ROUND2_HUBER_BETA_C = (0.25, 0.50, 1.00)   # x sigma_R
 ROUND2_LAMBDA_ENERGY = (0.0, 1e-3, 1e-2)
 ROUND2_LAMBDA_SMOOTH = (0.0, 1e-3, 1e-2)
+
+
+def _checkpoint(station: str) -> Path:
+    return Path("outputs/final_h16") / (
+        f"{station}_L{SEQ_LEN}_H{HORIZON}_psrc_seed{SEED}"
+    ) / "checkpoint.pt"
+
+
+def _load_bundle(station, config):
+    return load_dataset(
+        config.dataset(station).path,
+        SEQ_LEN,
+        HORIZON,
+        config.train_fraction,
+        config.validation_end_fraction,
+    )
+
+
+def _build_frozen(station, config, bundle, params, state, device):
+    job = JobSpec(station, "psrc", SEQ_LEN, HORIZON, SEED)
+    model = build_model(
+        job.model,
+        _model_config(job, bundle, params, bool(config.psrc["gate"])),
+    ).to(device)
+    model.load_state_dict(state, strict=True)
+    model.eval()
+    return model, job
+
+
+def _infer(model, bundle, starts, batch, device):
+    loader = _loader(bundle, starts, batch, False, SEED)
+    return _evaluate(model, loader, bundle, device, collect=True)
+
+
+def _calibrated_lookup(name, scale, q_grid, taus, bundle, starts, psrc):
+    """Physical-unit calibrated Chronos trajectory keyed by window start."""
+    if name.startswith("skew_b"):
+        base_all = skew_readout(q_grid, taus, float(name[len("skew_b"):]))
+    else:
+        base_all = readout(q_grid, taus, name)
+    base_all = contract_prior(base_all, bundle, starts, SEQ_LEN, HORIZON)
+    kind, value = scale
+    lookup = {}
+    for i, start in enumerate(starts):
+        prior = base_all[i]
+        psrc_prediction = psrc["pred_phys"][i]
+        if kind == "scalar":
+            calibrated = scale_disagreement(
+                prior[None], psrc_prediction[None], float(value)
+            )[0]
+        else:
+            calibrated = scale_disagreement_segments(
+                prior[None],
+                psrc_prediction[None],
+                tuple(float(gamma) for gamma in value),
+            )[0]
+        lookup[int(start)] = calibrated.astype(np.float32)
+    return lookup
 
 
 def _write_json(path: Path, payload) -> None:
@@ -153,7 +211,7 @@ def _merge_packs(train_pack, val_pack):
 
 
 def _station_cache(station, config):
-    bundle = prev._load_bundle(station, config)
+    bundle = _load_bundle(station, config)
     path = prior_cache_path_v4(
         bundle.path, HORIZON, LOCKED_CONTEXT, LOCKED_NORM
     )
@@ -225,17 +283,17 @@ def train_one(
     bundle, grid_lookup, q_grid = _station_cache(station, config)
     params = dict(records[station]["params"])
     state = torch.load(
-        prev._checkpoint(station), map_location="cpu", weights_only=True
+        _checkpoint(station), map_location="cpu", weights_only=True
     )["state_dict"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    frozen, job = prev._build_frozen(station, config, bundle, params, state, device)
+    frozen, job = _build_frozen(station, config, bundle, params, state, device)
     batch = int(params.get("batch", 128))
     taus = np.asarray(CHRONOS2_QUANTILES)
 
     train_starts = bundle.train.starts
     val_starts = bundle.validation.starts
-    train_a = prev._infer(frozen, bundle, train_starts, batch, device)[1]
-    val_a = prev._infer(frozen, bundle, val_starts, batch, device)[1]
+    train_a = _infer(frozen, bundle, train_starts, batch, device)[1]
+    val_a = _infer(frozen, bundle, val_starts, batch, device)[1]
     sd, mu = float(bundle.feature_sd[-1]), float(bundle.feature_mu[-1])
 
     def phys(a):
@@ -243,11 +301,11 @@ def train_one(
 
     train_q = q_grid[[grid_lookup[int(s)] for s in train_starts]]
     val_q = q_grid[[grid_lookup[int(s)] for s in val_starts]]
-    median_lookup = calib._calibrated_lookup(
+    median_lookup = _calibrated_lookup(
         cand_name, scale, train_q, taus, bundle, train_starts,
         {"pred_phys": phys(train_a)},
     )
-    median_lookup.update(calib._calibrated_lookup(
+    median_lookup.update(_calibrated_lookup(
         cand_name, scale, val_q, taus, bundle, val_starts,
         {"pred_phys": phys(val_a)},
     ))
@@ -401,7 +459,7 @@ def _phys_metrics(psrc_std, pred_std, target_std, sd, mu, capacity):
 def step0(config, records, root: Path) -> dict[str, object]:
     table = {}
     for station in STATIONS:
-        bundle = prev._load_bundle(station, config)
+        bundle = _load_bundle(station, config)
         table[station] = {"capacity": float(bundle.capacity)}
         for cand, scale in LOCKED_PRIORS:
             # Baseline epsilon: registered p90 rule (identical to Phase C).
@@ -410,16 +468,16 @@ def step0(config, records, root: Path) -> dict[str, object]:
             # derive it through a frozen inference pass first.
             params = dict(records[station]["params"])
             state = torch.load(
-                prev._checkpoint(station), map_location="cpu",
+                _checkpoint(station), map_location="cpu",
                 weights_only=True,
             )["state_dict"]
             device = torch.device(
                 "cuda" if torch.cuda.is_available() else "cpu"
             )
-            frozen, _ = prev._build_frozen(
+            frozen, _ = _build_frozen(
                 station, config, bundle, params, state, device
             )
-            train_a = prev._infer(
+            train_a = _infer(
                 frozen, bundle, bundle.train.starts,
                 int(params.get("batch", 128)), device,
             )[1]
@@ -431,7 +489,7 @@ def step0(config, records, root: Path) -> dict[str, object]:
             tag = f"step0__{cand.replace('+','p')}"
             payload, arrays = train_one(
                 station, config, records, cand, scale, tag, root,
-                lr=calib.ADAPTER_LR, weight_decay=calib.ADAPTER_WD,
+                lr=ADAPTER_LR, weight_decay=ADAPTER_WD,
                 epsilon=float(epsilon_info["epsilon"]),
             )
             shrink = shrinkage_analysis(arrays)
@@ -793,8 +851,9 @@ FORMAL_PSRC_TEST_RMSE = {
     "hkust": 1.843531,
 }
 
-
 def _adapter_dir(root: Path, cand: str, lock: dict) -> Path:
+    if lock.get("trial_dir"):
+        return root / str(lock["trial_dir"])
     cand_p = cand.replace("+", "p")
     stage, trial = lock["trial_tag"].split("__")
     return root / f"{stage}__{cand_p}__{trial}"
@@ -837,6 +896,128 @@ def _rebuild_model(station, config, records, bundle, state, lock, device):
     return model, cfg
 
 
+def _test_confirm_station(station, config, records, root: Path,
+                          cand: str, lock: dict, alpha_shuffled: float,
+                          shuffle_dir_name: str):
+    """PSRC / locked-FM / shuffled-FM on test for one station (inference)."""
+    scale = dict(LOCKED_PRIORS)[cand]
+    cap = _capacity(root, station)
+    bundle, grid_lookup, q_grid = _station_cache_with_test(root, station, config)
+    test_starts = np.asarray(bundle.test.starts)
+    if any(int(s) not in grid_lookup for s in test_starts):
+        raise ValueError(f"{station}: test windows still missing after "
+                         "sidecar build")
+    params = dict(records[station]["params"])
+    state = torch.load(
+        _checkpoint(station), map_location="cpu", weights_only=True,
+    )["state_dict"]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    frozen, _ = _build_frozen(station, config, bundle, params, state, device)
+    batch = int(params.get("batch", 128))
+    taus = np.asarray(CHRONOS2_QUANTILES)
+    test_a = _infer(frozen, bundle, test_starts, batch, device)[1]
+    sd = float(bundle.feature_sd[-1])
+    mu = float(bundle.feature_mu[-1])
+
+    test_q = q_grid[[grid_lookup[int(s)] for s in test_starts]]
+    prior_lookup = _calibrated_lookup(
+        cand, scale, test_q, taus, bundle, test_starts,
+        {"pred_phys": test_a["pred_std"] * sd + mu},
+    )
+    psrc_lookup = {
+        int(s): test_a["pred_std"][i] for i, s in enumerate(test_starts)
+    }
+    partners, _ = stratified_partners(
+        test_starts, bundle, SEQ_LEN, HORIZON, SHUFFLE_SEED + 2
+    )
+    test_pack = build_pack(
+        bundle, test_starts, SEQ_LEN, HORIZON,
+        prior_lookup, psrc_lookup, partners,
+    )
+    shuf_pack = build_pack(
+        bundle, test_starts, SEQ_LEN, HORIZON,
+        _shuffle_lookup(dict(prior_lookup), SEED + 2), psrc_lookup, partners,
+    )
+
+    def eval_adapter(adapter_path: Path, pack: PcFraPack):
+        model, _cfg = _rebuild_model(
+            station, config, records, bundle, state, lock, device
+        )
+        model.pc_fra_adapter.load_state_dict(
+            torch.load(adapter_path, map_location=device,
+                       weights_only=True)["state_dict"],
+            strict=True,
+        )
+        model.eval()
+        return _evaluate(
+            model,
+            _loader(bundle, test_starts, batch, False, SEED,
+                    fm_embeddings=pack),
+            bundle, device, collect=True,
+        )[1]
+
+    real_ckpt = _adapter_dir(root, cand, lock) / station / "adapter_checkpoint.pt"
+    shuf_ckpt = root / shuffle_dir_name / station / "adapter_checkpoint.pt"
+    if not real_ckpt.is_file() or not shuf_ckpt.is_file():
+        raise FileNotFoundError(
+            f"missing locked adapter(s): {real_ckpt} / {shuf_ckpt}"
+        )
+    arrays_real = eval_adapter(real_ckpt, test_pack)
+    arrays_shuf = eval_adapter(shuf_ckpt, shuf_pack)
+
+    psrc_s, tgt_s = test_a["pred_std"], test_a["target_std"]
+
+    def with_alpha(arrays, alpha):
+        return _phys_metrics(
+            psrc_s, psrc_s + alpha * (arrays["pred_std"] - psrc_s),
+            tgt_s, sd, mu, cap,
+        )
+
+    m_a = _phys_metrics(psrc_s, psrc_s, tgt_s, sd, mu, cap)
+    m_real = with_alpha(arrays_real, float(lock["alpha_star"]))
+    m_shuf = with_alpha(arrays_shuf, float(alpha_shuffled))
+    station_out = {
+        "chosen_prior": cand,
+        "locked_source": lock["source"],
+        "locked_hyperparameters": {
+            k: lock[k] for k in (
+                "lr", "c", "weight_decay", "epsilon", "huber_beta_std",
+                "lambda_energy", "lambda_smooth",
+            )
+        },
+        "alpha_from_validation": float(lock["alpha_star"]),
+        "n_test_windows": int(len(test_starts)),
+        "A_psrc": m_a,
+        "FM_real": m_real,
+        "FM_real_raw_no_shrink": _phys_metrics(
+            psrc_s, arrays_real["pred_std"], tgt_s, sd, mu, cap
+        ),
+        "FM_shuffled": m_shuf,
+        "formal_table_psrc_rmse": FORMAL_PSRC_TEST_RMSE[station],
+        "psrc_matches_formal_table": abs(
+            m_a["rmse_physical"] - FORMAL_PSRC_TEST_RMSE[station]
+        ) < 5e-6,
+        "real_beats_psrc": (
+            m_real["rmse_physical"] < m_a["rmse_physical"]
+            and m_real["mae_physical"] <= 1.005 * m_a["mae_physical"]
+        ),
+        "real_beats_shuffled": (
+            m_real["rmse_physical"] < m_shuf["rmse_physical"]
+        ),
+    }
+    tdir = root / "test_confirm" / station
+    tdir.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        tdir / "test_arrays.npz",
+        psrc_std=psrc_s.astype(np.float32),
+        pred_real_std=arrays_real["pred_std"].astype(np.float32),
+        pred_shuffled_std=arrays_shuf["pred_std"].astype(np.float32),
+        target_std=tgt_s.astype(np.float32),
+        target_sd=np.float32(sd), target_mu=np.float32(mu),
+    )
+    return station_out
+
+
 def test_confirm(config, records, root: Path) -> dict[str, object]:
     """Evaluate PSRC / FM / shuffled-FM on test ONCE, hyperparameters frozen.
 
@@ -850,138 +1031,11 @@ def test_confirm(config, records, root: Path) -> dict[str, object]:
     for station in STATIONS:
         body = shuf_rep["per_station"][station]
         cand = body["chosen_prior"]
-        scale = dict(LOCKED_PRIORS)[cand]
         lock = _locked_config(root, station)
-        cap = _capacity(root, station)
-
-        bundle, grid_lookup, q_grid = _station_cache_with_test(
-            root, station, config
-        )
-        test_starts = np.asarray(bundle.test.starts)
-        if any(int(s) not in grid_lookup for s in test_starts):
-            raise ValueError(f"{station}: test windows still missing after "
-                             "sidecar build")
-        params = dict(records[station]["params"])
-        state = torch.load(
-            prev._checkpoint(station), map_location="cpu", weights_only=True,
-        )["state_dict"]
-        device = torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
-        )
-        frozen, _ = prev._build_frozen(
-            station, config, bundle, params, state, device
-        )
-        batch = int(params.get("batch", 128))
-        taus = np.asarray(CHRONOS2_QUANTILES)
-        test_a = prev._infer(frozen, bundle, test_starts, batch, device)[1]
-        sd = float(bundle.feature_sd[-1])
-        mu = float(bundle.feature_mu[-1])
-
-        def phys(a):
-            return a["pred_std"] * sd + mu
-
-        test_q = q_grid[[grid_lookup[int(s)] for s in test_starts]]
-        prior_lookup = calib._calibrated_lookup(
-            cand, scale, test_q, taus, bundle, test_starts,
-            {"pred_phys": phys(test_a)},
-        )
-        psrc_lookup = {
-            int(s): test_a["pred_std"][i]
-            for i, s in enumerate(test_starts)
-        }
-        partners, _ = stratified_partners(
-            test_starts, bundle, SEQ_LEN, HORIZON, SHUFFLE_SEED + 2
-        )
-        test_pack = build_pack(
-            bundle, test_starts, SEQ_LEN, HORIZON,
-            prior_lookup, psrc_lookup, partners,
-        )
-        shuf_lookup = _shuffle_lookup(dict(prior_lookup), SEED + 2)
-        shuf_pack = build_pack(
-            bundle, test_starts, SEQ_LEN, HORIZON,
-            shuf_lookup, psrc_lookup, partners,
-        )
-
-        def eval_adapter(adapter_path: Path, pack: PcFraPack):
-            model, _cfg = _rebuild_model(
-                station, config, records, bundle, state, lock, device
-            )
-            model.pc_fra_adapter.load_state_dict(
-                torch.load(adapter_path, map_location=device,
-                           weights_only=True)["state_dict"],
-                strict=True,
-            )
-            model.eval()
-            return _evaluate(
-                model,
-                _loader(bundle, test_starts, batch, False, SEED,
-                        fm_embeddings=pack),
-                bundle, device, collect=True,
-            )[1]
-
-        real_dir = _adapter_dir(root, cand, lock)
-        real_ckpt = real_dir / station / "adapter_checkpoint.pt"
-        shuf_dir = root / (
-            f"shuffle__{cand.replace('+','p')}__{lock['source']}"
-        )
-        shuf_ckpt = shuf_dir / station / "adapter_checkpoint.pt"
-        if not shuf_ckpt.is_file():
-            raise FileNotFoundError(f"missing shuffled adapter: {shuf_ckpt}")
-        arrays_real = eval_adapter(real_ckpt, test_pack)
-        arrays_shuf = eval_adapter(shuf_ckpt, shuf_pack)
-
-        psrc_s = test_a["pred_std"]
-        tgt_s = test_a["target_std"]
-
-        def with_alpha(arrays, alpha):
-            pred_s = psrc_s + alpha * (arrays["pred_std"] - psrc_s)
-            m = _phys_metrics(psrc_s, pred_s, tgt_s, sd, mu, cap)
-            return m
-
-        m_a = _phys_metrics(psrc_s, psrc_s, tgt_s, sd, mu, cap)
-        m_real = with_alpha(arrays_real, float(lock["alpha_star"]))
-        m_real_raw = _phys_metrics(
-            psrc_s, arrays_real["pred_std"], tgt_s, sd, mu, cap
-        )
-        m_shuf = with_alpha(arrays_shuf, float(body["alpha_shuffled"]))
-
-        station_out = {
-            "chosen_prior": cand,
-            "locked_source": lock["source"],
-            "locked_hyperparameters": {
-                k: lock[k] for k in (
-                    "lr", "c", "weight_decay", "epsilon", "huber_beta_std",
-                    "lambda_energy", "lambda_smooth",
-                )
-            },
-            "alpha_from_validation": float(lock["alpha_star"]),
-            "n_test_windows": int(len(test_starts)),
-            "A_psrc": m_a,
-            "FM_real": m_real,
-            "FM_real_raw_no_shrink": m_real_raw,
-            "FM_shuffled": m_shuf,
-            "formal_table_psrc_rmse": FORMAL_PSRC_TEST_RMSE[station],
-            "psrc_matches_formal_table": abs(
-                m_a["rmse_physical"] - FORMAL_PSRC_TEST_RMSE[station]
-            ) < 5e-6,
-            "real_beats_psrc": (
-                m_real["rmse_physical"] < m_a["rmse_physical"]
-                and m_real["mae_physical"] <= 1.005 * m_a["mae_physical"]
-            ),
-            "real_beats_shuffled": (
-                m_real["rmse_physical"] < m_shuf["rmse_physical"]
-            ),
-        }
-        out[station] = station_out
-        tdir = root / "test_confirm" / station
-        tdir.mkdir(parents=True, exist_ok=True)
-        np.savez(
-            tdir / "test_arrays.npz",
-            psrc_std=psrc_s.astype(np.float32),
-            pred_real_std=arrays_real["pred_std"].astype(np.float32),
-            pred_shuffled_std=arrays_shuf["pred_std"].astype(np.float32),
-            target_std=tgt_s.astype(np.float32),
-            target_sd=np.float32(sd), target_mu=np.float32(mu),
+        out[station] = _test_confirm_station(
+            station, config, records, root, cand, lock,
+            float(body["alpha_shuffled"]),
+            f"shuffle__{cand.replace('+','p')}__{lock['source']}",
         )
     decision = {
         "per_station": out,

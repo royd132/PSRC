@@ -8,23 +8,13 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from formal.config import (
-    DATASET_NAMES,
-    MODEL_NAMES,
-    SEEDS,
-    ExperimentConfig,
-    JobSpec,
-    load_experiment_config,
-)
+from formal.config import ExperimentConfig, JobSpec, load_experiment_config
 from formal.engine import _parameter_record, run_job
 from formal.fm_table import build_fm_comparison_workbook
-from formal.report import build_workbook, write_report_payload
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "configs" / "formal_experiment.json"
 DRIFT_LIMIT = 0.005
-FM_H16_DATASETS = ("dkasc_site31", "dkasc_site1a", "pvod_station02", "hkust")
-FM_H16_MODELS = tuple(model for model in MODEL_NAMES if model != "smart_persistence")
 FM_H16_REPORT = ROOT / "outputs" / "correction_tune_v1" / "test_confirmation_report.json"
 
 
@@ -52,12 +42,6 @@ def config_fingerprint(job: JobSpec, config: ExperimentConfig) -> str:
         "parameter_source": parameter_source,
         "parameters": parameters,
     }
-    if job.model == "smart_persistence":
-        # Bumped when the deterministic clear-sky feature audit changes;
-        # invalidates smart persistence results produced against a
-        # mis-identified constant proxy column. Key is absent from every
-        # other model's payload so their fingerprints stay unchanged.
-        payload["solar_geometry_audit"] = "night_trajectory_v1"
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -139,61 +123,54 @@ def _drift_record(
 def finalize_report(
     output_dir: Path,
     config: ExperimentConfig,
-    jobs: list[JobSpec] | None = None,
-    fm_report: Path | None = None,
+    jobs: list[JobSpec],
+    fm_report: Path = FM_H16_REPORT,
     report_name: str | None = None,
 ) -> Path | None:
     """Build the workbook only when every locked job has a valid result."""
     results = []
-    for job in jobs or config.jobs():
+    for job in jobs:
         result_path = output_dir / job.key / "result.json"
         if not should_skip(result_path, config_fingerprint(job, config)):
             return None
         results.append(json.loads(result_path.read_text(encoding="utf-8")))
-    if fm_report is not None:
-        return build_fm_comparison_workbook(
-            results,
-            fm_report,
-            output_dir / (report_name or "formal_comparison_subset_with_fm.xlsx"),
-        )
-    payload_path = write_report_payload(results, output_dir / "formal_report.json")
-    workbook_path = output_dir / (report_name or "formal_comparison.xlsx")
-    build_workbook(payload_path, workbook_path)
-    return workbook_path
+    return build_fm_comparison_workbook(
+        results,
+        fm_report,
+        output_dir / (report_name or "formal_comparison_subset_with_fm.xlsx"),
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument(
-        "--preset",
-        choices=("fm-h16",),
-        help="locked experiment preset; fm-h16 reproduces the published four-station table",
-    )
     parser.add_argument(
         "--output",
         type=Path,
         help="override the output directory declared by the configuration",
     )
-    parser.add_argument("--datasets", nargs="+", choices=DATASET_NAMES)
-    parser.add_argument("--models", nargs="+", choices=MODEL_NAMES)
-    parser.add_argument("--seeds", nargs="+", type=int, choices=list(SEEDS))
     parser.add_argument(
         "--require-artifacts",
         action="store_true",
         help="resume also requires predictions.npz/checkpoint.pt to be present",
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--semantic-optuna", action="store_true",
+                        help="equal-budget seed2026 Optuna controls and locked test evaluation")
+    parser.add_argument("--physical-language", choices=("plan", "audit", "prepare", "train", "test", "report"),
+                        help="isolated frozen GPT-2 / physical-token alignment study; explicit test only")
+    parser.add_argument("--semantic-tune", action="store_true",
+                        help="validation-only local tuning of the semantic branch")
+    parser.add_argument("--semantic-study", choices=("plan", "train", "test", "report"),
+                        help="paired-seed semantic specificity study; separate train/test phases")
+    parser.add_argument("--evidence-study", choices=("audit", "train", "test", "all"),
+                        help="supplementary frozen-prior controls; independent output directory")
+    parser.add_argument("--prior-robustness", choices=("diagnose", "train", "all"),
+                        help="fixed-model matched controls and validation-only equal-budget training")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--report-only",
         action="store_true",
         help="rebuild the report from complete locked result files without training",
-    )
-    parser.add_argument(
-        "--fm-report",
-        type=Path,
-        help="locked Chronos test-confirmation JSON; builds the four-station FM table",
     )
     parser.add_argument(
         "--rebuild-fm",
@@ -209,35 +186,48 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> ExecutionSummary:
     args = _parser().parse_args(argv)
-    config = load_experiment_config(args.config)
+    if args.physical_language:
+        if any((args.semantic_optuna, args.semantic_tune, args.semantic_study,
+                args.prior_robustness, args.evidence_study, args.rebuild_fm, args.report_only,
+                args.output, args.report_name)):
+            raise ValueError("Physical-language study must run alone with its isolated output directory")
+        from formal.physical_language import main as language_main
+        language_main(args.physical_language, dry_run=args.dry_run)
+        return ExecutionSummary(0, 0, 0)
+    if args.semantic_optuna:
+        if args.semantic_tune or args.semantic_study or args.prior_robustness or args.evidence_study:
+            raise ValueError("Choose one supplementary study at a time")
+        from formal.semantic_optuna import main as optuna_main
+        optuna_main(dry_run=args.dry_run)
+        return ExecutionSummary(0, 0, 0)
+    if args.semantic_tune:
+        if args.semantic_study or args.prior_robustness or args.evidence_study:
+            raise ValueError("Choose one supplementary study at a time")
+        from formal.semantic_tune import main as tune_main
+        tune_main(dry_run=args.dry_run)
+        return ExecutionSummary(0, 0, 0)
+    if sum(bool(x) for x in (args.semantic_study, args.prior_robustness, args.evidence_study)) > 1:
+        raise ValueError("Choose one supplementary study at a time")
+    if args.semantic_study:
+        from formal.semantic_study import main as semantic_main
+        semantic_main(args.semantic_study, dry_run=args.dry_run)
+        return ExecutionSummary(0, 0, 0)
+    if args.prior_robustness:
+        if args.evidence_study:
+            raise ValueError("Choose one supplementary study at a time")
+        from formal.prior_robustness import main as robustness_main
+        robustness_main(args.prior_robustness, dry_run=args.dry_run)
+        return ExecutionSummary(0, 0, 0)
+    if args.evidence_study:
+        from formal.evidence_study import main as evidence_main
+        evidence_main(args.evidence_study, dry_run=args.dry_run)
+        return ExecutionSummary(0, 0, 0)
+    config = load_experiment_config(DEFAULT_CONFIG)
     output_dir = (args.output or config.output_dir).resolve()
-    if args.preset == "fm-h16":
-        if args.datasets or args.models or args.seeds:
-            raise ValueError("--preset fm-h16 cannot be combined with dataset/model/seed filters")
-        selected_datasets = set(FM_H16_DATASETS)
-        selected_models = set(FM_H16_MODELS)
-        selected_seeds = {2026}
-        args.fm_report = args.fm_report or FM_H16_REPORT
-        args.report_name = args.report_name or "formal_comparison_subset_with_fm.xlsx"
-    else:
-        selected_datasets = set(args.datasets or (item.name for item in config.datasets))
-        selected_models = set(args.models or config.models)
-        selected_seeds = set(args.seeds or config.seeds)
-    jobs = [
-        job
-        for job in config.jobs()
-        if job.dataset in selected_datasets
-        and job.model in selected_models
-        and job.seed in selected_seeds
-    ]
-    if args.preset == "fm-h16":
-        order = {name: index for index, name in enumerate(FM_H16_DATASETS)}
-        model_order = {name: index for index, name in enumerate(FM_H16_MODELS)}
-        jobs.sort(key=lambda job: (order[job.dataset], model_order[job.model], job.seed))
+    jobs = config.jobs()
+    args.report_name = args.report_name or "formal_comparison_subset_with_fm.xlsx"
     if args.report_name and Path(args.report_name).name != args.report_name:
         raise ValueError("--report-name must be a filename, not a path")
-    if args.rebuild_fm and args.preset != "fm-h16":
-        raise ValueError("--rebuild-fm requires --preset fm-h16")
     if args.rebuild_fm and args.report_only:
         raise ValueError("--rebuild-fm and --report-only are mutually exclusive")
     if args.dry_run:
@@ -251,12 +241,12 @@ def main(argv: list[str] | None = None) -> ExecutionSummary:
             output_dir,
             config,
             jobs=jobs,
-            fm_report=args.fm_report.resolve() if args.fm_report else None,
+            fm_report=FM_H16_REPORT,
             report_name=args.report_name,
         )
         if workbook_path is None:
             raise RuntimeError(
-                "report-only requires complete results with matching config fingerprints"
+                "report-only requires all locked results with matching fingerprints"
             )
         print(f"report={workbook_path}", flush=True)
         return ExecutionSummary(len(jobs), 0, len(jobs))
@@ -320,12 +310,12 @@ def main(argv: list[str] | None = None) -> ExecutionSummary:
         conflicts = [r for r in drift_records if r.get("status") == "conflict"]
         print(f"drift_report={drift_path} conflicts={len(conflicts)}", flush=True)
     if args.rebuild_fm:
-        from run_correction_tune_h16 import main as run_fm_campaign
+        from formal.fm_campaign import main as run_fm_campaign
 
-        fm_root = args.fm_report.resolve().parent
+        fm_root = FM_H16_REPORT.parent
         run_fm_campaign(
             [
-                "--config", str(args.config),
+                "--config", str(DEFAULT_CONFIG),
                 "--output-root", str(fm_root),
                 "--step0", "--round1", "--round2",
                 "--shuffle-control", "--test-confirm",
@@ -335,9 +325,13 @@ def main(argv: list[str] | None = None) -> ExecutionSummary:
         output_dir,
         config,
         jobs=jobs,
-        fm_report=args.fm_report.resolve() if args.fm_report else None,
+        fm_report=FM_H16_REPORT,
         report_name=args.report_name,
     )
     if workbook_path is not None:
         print(f"report={workbook_path}", flush=True)
     return summary
+
+
+if __name__ == "__main__":
+    main()

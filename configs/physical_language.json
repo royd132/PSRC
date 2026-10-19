@@ -1,0 +1,32 @@
+{
+  "output": "outputs/physical_language_v1",
+  "seed": 2026,
+  "epochs": 100,
+  "patience": 10,
+  "train_windows": 6000,
+  "batch": 128,
+  "learning_rates": [0.0001, 0.0003, 0.001],
+  "weight_decay": 0.001,
+  "alignment_weight": 0.01,
+  "correction_sigma_fraction": 0.25,
+  "validation_scales": [0.0, 0.25, 0.5, 1.0],
+  "mae_tolerance": 1.005,
+  "stations": {
+    "dkasc_site31": {
+      "adapter_dir": "outputs/correction_tune_v1/round2__skew_bp0.50__t09/dkasc_site31",
+      "alpha": 1.0
+    },
+    "dkasc_site1a": {
+      "adapter_dir": "outputs/correction_tune_e100_v1/round1__mean_q_full__t11/dkasc_site1a",
+      "alpha": 1.0
+    },
+    "pvod_station02": {
+      "adapter_dir": "outputs/correction_tune_v1/round1__mean_q_full__t11/pvod_station02",
+      "alpha": 1.0
+    },
+    "hkust": {
+      "adapter_dir": "outputs/correction_tune_v1/round1__mean_q_full__t00/hkust",
+      "alpha": 1.0
+    }
+  }
+}

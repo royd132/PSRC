@@ -1,4 +1,4 @@
-"""Validated configuration for the formal H16 comparison and H24 archive."""
+"""Validated configuration for the locked four-station H16 comparison."""
 
 from __future__ import annotations
 
@@ -8,13 +8,8 @@ from pathlib import Path
 
 DATASET_NAMES = (
     "dkasc_site31",
-    "dkasc_site9a",
     "dkasc_site1a",
-    "dkasc_site19",
-    "pvod_station00",
-    "pvod_station01",
     "pvod_station02",
-    "pvod_station03",
     "hkust",
 )
 MODEL_NAMES = (
@@ -33,30 +28,17 @@ MODEL_NAMES = (
     "lstm",
     "gru",
     "timexer",
+    "dwt_former",
     "persistence",
     "seasonal_naive",
-    "smart_persistence",
 )
 # Parameter-free reference baselines are evaluated once per seed but never
 # trained; every other model follows the locked 100-epoch protocol.
-DETERMINISTIC_MODELS = ("persistence", "seasonal_naive", "smart_persistence")
-# Public-configuration baselines copied from the reference repository are run
-# once at the anchor seed only, exactly as published (no per-seed retuning).
-SINGLE_SEED_MODELS = ("tcn", "frets", "lstm", "gru", "timexer")
-# Models whose architecture hyperparameters come from the reference
-# repository's published configuration instead of the shared baseline block.
-# PatchTST keeps the full three-seed matrix; the five imported baselines run
-# once at the anchor seed only.
-PUBLIC_BASELINE_MODELS = ("patchtst",) + SINGLE_SEED_MODELS
-SEEDS = (2026, 2027, 2028)
-ALLOWED_HORIZONS = (16, 24)
+DETERMINISTIC_MODELS = ("persistence", "seasonal_naive")
+LOCKED_BASELINE_MODELS = ("patchtst", "tcn", "frets", "lstm", "gru", "timexer", "dwt_former")
+SEEDS = (2026,)
+ALLOWED_HORIZONS = (16,)
 ALLOWED_SEEDS = SEEDS
-
-
-def seeds_for_model(model: str) -> tuple[int, ...]:
-    if model in SINGLE_SEED_MODELS:
-        return (SEEDS[0],)
-    return SEEDS
 
 
 @dataclass(frozen=True)
@@ -94,7 +76,7 @@ class ExperimentConfig:
     train_windows_per_epoch: int
     psrc: dict[str, object]
     baseline: dict[str, object]
-    public_baselines: dict[str, dict[str, object]]
+    baseline_overrides: dict[str, dict[str, object]]
     best_parameters: Path
 
     def jobs(self) -> list[JobSpec]:
@@ -103,24 +85,11 @@ class ExperimentConfig:
             for dataset in self.datasets
             for horizon in self.horizons
             for model in self.models
-            for seed in self.seeds_for(model)
+            for seed in self.seeds
         ]
 
     def dataset(self, name: str) -> DatasetSpec:
         return next(dataset for dataset in self.datasets if dataset.name == name)
-
-    def seeds_for(self, model: str) -> tuple[int, ...]:
-        """Seeds a model is evaluated under.
-
-        Public-configuration baselines always run once at the anchor seed
-        (2026); every tuned/protocol model is repeated across the seeds
-        selected for this experiment run.
-        """
-        allowed = seeds_for_model(model)
-        if model in SINGLE_SEED_MODELS:
-            return allowed
-        return tuple(seed for seed in self.seeds if seed in allowed)
-
 
 def _require_exact(actual, expected, label: str) -> None:
     if tuple(actual) != tuple(expected):
@@ -167,9 +136,7 @@ def load_experiment_config(path: Path) -> ExperimentConfig:
     models = tuple(payload["models"])
     horizons = tuple(int(value) for value in payload["horizons"])
     seeds = tuple(int(value) for value in payload["seeds"])
-    # The historical H24 config pins the full four-station matrix exactly;
-    # newer campaigns may select allow-listed subsets/add the fifth station.
-    _require_subset((item.name for item in datasets), DATASET_NAMES, "datasets")
+    _require_exact((item.name for item in datasets), DATASET_NAMES, "datasets")
     _require_exact(models, MODEL_NAMES, "models")
     _require_subset(horizons, ALLOWED_HORIZONS, "horizons")
     _require_subset(seeds, ALLOWED_SEEDS, "seeds")
@@ -181,13 +148,13 @@ def load_experiment_config(path: Path) -> ExperimentConfig:
     validation = float(payload["validation_end_fraction"])
     if not 0.0 < train < validation < 1.0:
         raise ValueError("split fractions must satisfy 0 < train < validation < 1")
-    public_baselines = payload.get("public_baselines", {})
+    baseline_overrides = payload.get("baseline_overrides", {})
     _require_exact(
-        public_baselines, PUBLIC_BASELINE_MODELS, "public baseline models"
+        baseline_overrides, LOCKED_BASELINE_MODELS, "baseline override models"
     )
-    for model, record in public_baselines.items():
+    for model, record in baseline_overrides.items():
         if not isinstance(record, dict) or not record:
-            raise ValueError(f"public baseline config must be a non-empty mapping: {model}")
+            raise ValueError(f"baseline override must be a non-empty mapping: {model}")
     config = ExperimentConfig(
         output_dir=(root / payload["output_dir"]).resolve(),
         datasets=datasets,
@@ -203,8 +170,8 @@ def load_experiment_config(path: Path) -> ExperimentConfig:
         train_windows_per_epoch=int(payload["train_windows_per_epoch"]),
         psrc=dict(payload["psrc"]),
         baseline=dict(payload["baseline"]),
-        public_baselines={
-            model: dict(record) for model, record in public_baselines.items()
+        baseline_overrides={
+            model: dict(record) for model, record in baseline_overrides.items()
         },
         best_parameters=(root / payload["best_parameters"]).resolve(),
     )

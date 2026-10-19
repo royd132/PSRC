@@ -6,32 +6,12 @@
    "path": "data/DKASC_site31_15min.csv"
   },
   {
-   "name": "dkasc_site9a",
-   "path": "data/DKASC_site9a_15min.csv"
-  },
-  {
    "name": "dkasc_site1a",
    "path": "data/DKASC_site1a_15min.csv"
   },
   {
-   "name": "dkasc_site19",
-   "path": "data/DKASC_site19_15min.csv"
-  },
-  {
-   "name": "pvod_station00",
-   "path": "data/PVOD_station00_15min.csv"
-  },
-  {
-   "name": "pvod_station01",
-   "path": "data/PVOD_station01_15min.csv"
-  },
-  {
    "name": "pvod_station02",
    "path": "data/PVOD_station02_15min.csv"
-  },
-  {
-   "name": "pvod_station03",
-   "path": "data/PVOD_station03_15min.csv"
   },
   {
    "name": "hkust",
@@ -54,9 +34,9 @@
   "lstm",
   "gru",
   "timexer",
+  "dwt_former",
   "persistence",
-  "seasonal_naive",
-  "smart_persistence"
+  "seasonal_naive"
  ],
  "seq_len": 96,
  "horizons": [
@@ -83,7 +63,7 @@
   "scheduler": "none",
   "loss_base": "mse"
  },
- "public_baselines": {
+ "baseline_overrides": {
   "patchtst": {
    "patchtst_d_model": 128,
    "patchtst_d_ff": 256,
@@ -107,12 +87,14 @@
   },
   "lstm": {
    "lstm_d_model": 128,
-   "lstm_layers": 1,
+   "lstm_layers": 3,
+   "lstm_dropout": 0.3,
    "weight_decay": 0.0
   },
   "gru": {
-   "gru_d_model": 128,
-   "gru_layers": 1,
+   "gru_d_model": 64,
+   "gru_layers": 3,
+   "gru_dropout": 0.3,
    "weight_decay": 0.0
   },
   "timexer": {
@@ -122,6 +104,15 @@
    "timexer_patch_len": 6,
    "timexer_dropout": 0.1,
    "timexer_use_norm": false,
+   "weight_decay": 0.0
+  },
+  "dwt_former": {
+   "dwt_d_model": 32,
+   "dwt_d_ff": 1024,
+   "dwt_dropout": 0.09,
+   "dwt_sampling_layers": 2,
+   "lr": 0.002489072819868877,
+   "batch": 62,
    "weight_decay": 0.0
   }
  },

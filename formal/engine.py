@@ -21,7 +21,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from formal.config import (
     DETERMINISTIC_MODELS,
-    PUBLIC_BASELINE_MODELS,
+    LOCKED_BASELINE_MODELS,
     ExperimentConfig,
     JobSpec,
     load_best_parameters,
@@ -289,33 +289,6 @@ def _seed_everything(seed: int) -> None:
     torch.use_deterministic_algorithms(True)
 
 
-def _solar_geometry(bundle: DatasetBundle) -> dict[str, object] | None:
-    """Audited deterministic future geometry consumed by smart persistence."""
-    if bundle.clear_sky_index is None:
-        return None
-    geometry: dict[str, object] = {
-        "clear_sky_index": bundle.clear_sky_index,
-        "clear_future_pos": 0,
-        "daylight_future_pos": 1 if bundle.daylight_index is not None else None,
-        "target_mu": float(bundle.feature_mu[-1]),
-        "target_sd": float(bundle.feature_sd[-1]),
-        "clear_mu": float(bundle.feature_mu[bundle.clear_sky_index]),
-        "clear_sd": float(bundle.feature_sd[bundle.clear_sky_index]),
-        "clear_sky_training_max": float(
-            bundle.raw[: bundle.train_end, bundle.clear_sky_index].max()
-        ),
-        "capacity": bundle.capacity,
-    }
-    if bundle.daylight_index is not None:
-        geometry["daylight_mu"] = float(
-            bundle.feature_mu[bundle.daylight_index]
-        )
-        geometry["daylight_sd"] = float(
-            bundle.feature_sd[bundle.daylight_index]
-        )
-    return geometry
-
-
 def _model_config(
     job: JobSpec,
     bundle: DatasetBundle,
@@ -352,14 +325,20 @@ def _model_config(
         frets_hidden_size=int(params.get("frets_hidden_size", 256)),
         lstm_d_model=int(params.get("lstm_d_model", 128)),
         lstm_layers=int(params.get("lstm_layers", 1)),
+        lstm_dropout=float(params.get("lstm_dropout", 0.0)),
         gru_d_model=int(params.get("gru_d_model", 128)),
         gru_layers=int(params.get("gru_layers", 1)),
+        gru_dropout=float(params.get("gru_dropout", 0.0)),
         timexer_d_model=int(params.get("timexer_d_model", 256)),
         timexer_heads=int(params.get("timexer_heads", 4)),
         timexer_layers=int(params.get("timexer_layers", 3)),
         timexer_patch_len=int(params.get("timexer_patch_len", 6)),
         timexer_dropout=float(params.get("timexer_dropout", 0.1)),
         timexer_use_norm=bool(params.get("timexer_use_norm", False)),
+        dwt_d_model=int(params.get("dwt_d_model", 32)),
+        dwt_d_ff=int(params.get("dwt_d_ff", 1024)),
+        dwt_dropout=float(params.get("dwt_dropout", 0.09)),
+        dwt_sampling_layers=int(params.get("dwt_sampling_layers", 2)),
     )
     config.pc_fra = dict(pc_fra) if pc_fra else None
     ablation_set = frozenset(ablation or ())
@@ -376,6 +355,7 @@ def _model_config(
             bundle.feature_sd,
             float(bundle.feature_mu[-1]),
             float(bundle.feature_sd[-1]),
+            token_statistics=str(params.get("token_statistics", "physical")),
         )
         # Ablation arm "no_gate" requires an unconditional correction, i.e.
         # an exact confidence gate of g == 1 (not the station's max_gate).
@@ -383,6 +363,31 @@ def _model_config(
         max_gate = 1.0 if "no_gate" in ablation_set else float(psrc["max_gate"])
         config.semantic_residual_max_correction = float(psrc["max_correction"])
         config.semantic_residual_max_gate = max_gate
+        # Supplementary semantic-evidence controls (matched protocol).
+        token_drop_map = {
+            "no_tok_ramp": 0,
+            "no_tok_cloud": 1,
+            "no_tok_coupling": 2,
+            "no_tok_thermal": 3,
+            "no_tok_diurnal": 4,
+            "no_tok_volatility": 5,
+        }
+        drops = [token_drop_map[a] for a in ablation_set if a in token_drop_map]
+        if len(drops) > 1:
+            raise ValueError("only one token category may be dropped per arm")
+        if "shuffle_tokens" in ablation_set and "random_tokens" in ablation_set:
+            raise ValueError("shuffle_tokens and random_tokens are separate arms")
+        if "mlp_residual" in ablation_set:
+            semantic_variant = "mlp"
+        elif "concat_stats" in ablation_set:
+            semantic_variant = "concat"
+        else:
+            semantic_variant = "cross"
+        token_mode = (
+            "shuffle" if "shuffle_tokens" in ablation_set
+            else "random" if "random_tokens" in ablation_set
+            else "real"
+        )
         config.physical_semantic = {
             "roles": roles,
             "feature_mu": bundle.feature_mu.tolist(),
@@ -393,16 +398,14 @@ def _model_config(
             "token_scale": token_scale.tolist(),
             "d_token": 32,
             "use_gate": use_gate,
+            "token_drop": drops[0] if drops else None,
+            "token_mode": token_mode,
+            "semantic_variant": semantic_variant,
+            "token_statistics": str(params.get("token_statistics", "physical")),
+            "regroup_seed": params.get("regroup_seed"),
+            "shared_retrieval": bool(params.get("shared_retrieval", False)),
         }
         config.ablation = tuple(sorted(ablation_set))
-    if job.model == "smart_persistence":
-        geometry = _solar_geometry(bundle)
-        if geometry is None:
-            raise ValueError(
-                f"{job.dataset} has no deterministic clear-sky geometry "
-                "feature for smart persistence"
-            )
-        config.solar_geometry = geometry
     return config
 
 
@@ -568,12 +571,15 @@ def save_checkpoint(directory: Path, model: torch.nn.Module) -> Path:
 def _parameter_record(
     job: JobSpec, config: ExperimentConfig
 ) -> tuple[str, dict[str, object]]:
-    if job.model in PUBLIC_BASELINE_MODELS:
-        # Locked training protocol + architecture hyperparameters published
-        # by the reference repository (no per-site/per-seed retuning).
-        return "public_configuration", {
+    if job.model in LOCKED_BASELINE_MODELS:
+        source = (
+            "locked_sensitivity_configuration"
+            if job.model in {"lstm", "gru"}
+            else "public_configuration"
+        )
+        return source, {
             **dict(config.baseline),
-            **dict(config.public_baselines[job.model]),
+            **dict(config.baseline_overrides[job.model]),
         }
     if job.model != "psrc":
         return "baseline_fixed", dict(config.baseline)

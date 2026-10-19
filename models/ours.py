@@ -199,7 +199,14 @@ class Model(nn.Module):
         # construction, so the formal (non-ablation) forward path is
         # numerically unchanged; every submodule is still built so checkpoint
         # parameter names stay identical across variants.
+        #   no_corpatch: collapse the Multi-scale Correlation Patch Encoder
+        #   to a single-scale basic patch (1 h): the base temporal patch
+        #   mixer is retained, while cross-variable correlation attention and
+        #   the learned multi-scale router are bypassed.
         self.ablation = frozenset(getattr(configs, "ablation", ()) or ())
+        self.semantic_variant = str(
+            physical_cfg.get("semantic_variant", "cross")
+        )
 
         self.revin = RevIN(self.enc_in)
         self.state_encoder = PhysicalStateEncoder(
@@ -244,6 +251,10 @@ class Model(nn.Module):
             token_scale=physical_cfg["token_scale"],
             d_token=prompt_dim,
             dropout=dropout,
+            token_drop=physical_cfg.get("token_drop"),
+            token_mode=str(physical_cfg.get("token_mode", "real")),
+            token_statistics=str(physical_cfg.get("token_statistics", "physical")),
+            regroup_seed=physical_cfg.get("regroup_seed"),
         )
         self.residual_calibration = SemanticResidualCalibration(
             self.d_model,
@@ -256,6 +267,8 @@ class Model(nn.Module):
             max_gate=float(getattr(configs, "semantic_residual_max_gate", 1.0)),
             use_gate=bool(physical_cfg.get("use_gate", True)),
             dropout=dropout,
+            semantic_variant=str(physical_cfg.get("semantic_variant", "cross")),
+            shared_retrieval=bool(physical_cfg.get("shared_retrieval", False)),
         )
 
         pc_fra_cfg = getattr(configs, "pc_fra", None)
@@ -337,11 +350,23 @@ class Model(nn.Module):
         # the locked run exactly. The two purely numerical calibration arms
         # skip this encoder by construction.
         needs_semantic = not (
-            "numerical_backbone" in ab or "numeric_residual" in ab
+            "numerical_backbone" in ab
+            or "numeric_residual" in ab
+            or "mlp_residual" in ab
         )
-        semantic_state = (
-            self.physical_semantic_encoder(x_enc) if needs_semantic else None
-        )
+        semantic_raw = None
+        if "concat_stats" in ab:
+            # Direct-concatenation control: the same 36 fixed causal
+            # statistics, standardized, but flattened into one vector with
+            # no category-wise projection / attention retrieval.
+            semantic_state = None
+            semantic_raw = self.physical_semantic_encoder.standardized_tokens(
+                x_enc
+            ).flatten(start_dim=1)
+        else:
+            semantic_state = (
+                self.physical_semantic_encoder(x_enc) if needs_semantic else None
+            )
 
         # --- Group A: numerical time-frequency backbone -------------------
         gtr = self.gtr(x, cycle)
@@ -372,10 +397,21 @@ class Model(nn.Module):
                     + tf_weights[:, 1, None, None] * spectral_residual
                 )
 
-        scale_features = self.corpatch.encode_scales(self.patch(fused))
-        variables, _ = self.corpatch.fuse_scales(scale_features, state)
+        if "no_corpatch" in ab:
+            # Single-scale basic patch: encode only the base (1 h) scale with
+            # its temporal patch mixer, pool over patches, and skip both the
+            # cross-variable correlation attention and the multi-scale router.
+            base_patches = self.patch(fused)[0]
+            batch, variables, patch_count, width = base_patches.shape
+            mixed = self.corpatch.temporal_mixers[0](
+                base_patches.reshape(batch * variables, patch_count, width)
+            ).reshape(batch, variables, patch_count, width)
+            variables_tokens = self.corpatch.output_norm(mixed.mean(dim=2))
+        else:
+            scale_features = self.corpatch.encode_scales(self.patch(fused))
+            variables_tokens, _ = self.corpatch.fuse_scales(scale_features, state)
 
-        base_prediction = self.forecast_head(variables)
+        base_prediction = self.forecast_head(variables_tokens)
 
         # --- Group B: physics-aware semantic residual calibration ---------
         if "numerical_backbone" in ab:
@@ -387,15 +423,34 @@ class Model(nn.Module):
                 # B2: keep the residual head/gate/supervision but remove all
                 # physics-semantic conditioning (self-attend numeric queries).
                 prediction, _, gate = self.residual_calibration(
-                    variables,
+                    variables_tokens,
                     state,
                     base_prediction,
                     None,
                     numeric_only=True,
                 )
+            elif "mlp_residual" in ab:
+                # B3: matched-capacity plain per-horizon MLP residual, no
+                # physical statistics and no attention retrieval.
+                prediction, _, gate = self.residual_calibration(
+                    variables_tokens,
+                    state,
+                    base_prediction,
+                    None,
+                )
+            elif "concat_stats" in ab:
+                # B4: flattened physical statistics through a matched MLP
+                # broadcast to all horizons (no cross-attention).
+                prediction, _, gate = self.residual_calibration(
+                    variables_tokens,
+                    state,
+                    base_prediction,
+                    None,
+                    semantic_raw=semantic_raw,
+                )
             else:
                 prediction, _, gate = self.residual_calibration(
-                    variables,
+                    variables_tokens,
                     state,
                     base_prediction,
                     semantic_state,

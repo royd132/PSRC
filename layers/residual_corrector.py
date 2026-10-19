@@ -60,8 +60,16 @@ class SemanticResidualCalibration(nn.Module):
         max_gate: float = 1.0,
         use_gate: bool = True,
         dropout: float = 0.0,
+        semantic_variant: str = "cross",
+        stat_width: int = 36,
+        mlp_width: int | None = None,
+        concat_width: int | None = None,
+        shared_retrieval: bool = False,
     ) -> None:
         super().__init__()
+        self.shared_retrieval = shared_retrieval
+        if semantic_variant not in ("cross", "mlp", "concat"):
+            raise ValueError(f"unknown semantic_variant {semantic_variant!r}")
         if d_model % heads != 0:
             raise ValueError("d_model must be divisible by calibration attention heads")
 
@@ -73,6 +81,7 @@ class SemanticResidualCalibration(nn.Module):
             raise ValueError("max_gate must be between zero and one")
         self.max_gate = float(max_gate)
         self.use_gate = bool(use_gate)
+        self.semantic_variant = str(semantic_variant)
 
         self.context_projection = nn.Sequential(
             nn.LayerNorm(3 * d_model),
@@ -98,6 +107,64 @@ class SemanticResidualCalibration(nn.Module):
         self.residual_head = nn.Linear(d_model, 1)
         self.confidence_head = nn.Linear(d_model, 1) if self.use_gate else None
 
+        # Matched-capacity control branches. Built ONLY for non-cross
+        # variants so the formal "cross" state dict stays identical to the
+        # locked checkpoints (strict loading elsewhere is unaffected).
+        # Hidden widths are solved from the ACTUAL parameter count of the
+        # retrieval path these branches replace (cross-attention +
+        # semantic projection), keeping total instantiated parameters equal
+        # across variants to within a handful of parameters.
+        retrieval_params = sum(
+            p.numel() for p in self.cross_attention.parameters()
+        ) + sum(p.numel() for p in self.semantic_projection.parameters())
+        self.control_target_params = retrieval_params
+        self.numeric_mlp = None
+        self.concat_mlp = None
+        self.control_actual_params = 0
+        if semantic_variant == "mlp":
+            # Linear(D,h) + Linear(h,D) parameter count = h(2D+1) + D.
+            if mlp_width is None:
+                unit, const = 2 * d_model + 1, d_model
+                cands = [(retrieval_params - const) // unit,
+                         (retrieval_params - const) // unit + 1]
+                mlp_width = min(cands, key=lambda h: abs(
+                    h * unit + const - retrieval_params))
+            self.numeric_mlp = nn.Sequential(
+                nn.Linear(d_model, mlp_width),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(mlp_width, d_model),
+            )
+            self.control_actual_params = sum(
+                p.numel() for p in self.numeric_mlp.parameters())
+        elif semantic_variant == "concat":
+            # No LayerNorm: the flattened statistics are already standardized
+            # with training-window token statistics.
+            # Linear(S,h) + Linear(h,D) parameter count = h(S+D+1) + D.
+            if concat_width is None:
+                unit, const = stat_width + d_model + 1, d_model
+                cands = [(retrieval_params - const) // unit,
+                         (retrieval_params - const) // unit + 1]
+                concat_width = min(cands, key=lambda h: abs(
+                    h * unit + const - retrieval_params))
+            self.concat_mlp = nn.Sequential(
+                nn.Linear(stat_width, concat_width),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(concat_width, d_model),
+            )
+            self.control_actual_params = sum(
+                p.numel() for p in self.concat_mlp.parameters())
+
+        if semantic_variant in ("mlp", "concat"):
+            # Retrieval modules are graph-unreachable in these arms; freeze
+            # them so trainable parameter counts match the cross arm exactly
+            # (AdamW would otherwise decay parameters with zero gradient).
+            for module in (self.cross_attention, self.semantic_projection,
+                           self.semantic_norm):
+                for p in module.parameters():
+                    p.requires_grad_(False)
+
         nn.init.zeros_(self.residual_head.weight)
         nn.init.zeros_(self.residual_head.bias)
         if self.confidence_head is not None:
@@ -112,17 +179,21 @@ class SemanticResidualCalibration(nn.Module):
         semantic_state: torch.Tensor | None,
         *,
         numeric_only: bool = False,
+        semantic_raw: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return (corrected forecast, raw residual dyhat, confidence gate).
 
         ``corrected = base_prediction + gate * dyhat``; with the gate
         disabled the gate term is exactly one (unconditional correction).
 
-        When ``numeric_only`` is set (ablation arm "numeric_residual"), the
-        physics-aware semantic memory is not consumed: the calibration head
-        keeps the exact same parameters and its residual/gate supervision,
-        but cross-attention attends to the numerical horizon queries
-        themselves instead of physical semantic tokens.
+        Control variants (supplementary matched-capacity study):
+          * numeric_only ("numeric_residual"): cross-attention self-attends
+            to the numerical horizon queries, no physical tokens;
+          * semantic_variant="mlp": a parameter-matched per-horizon MLP
+            replaces cross-attention, no physical tokens;
+          * semantic_variant="concat": flattened standardized physical
+            statistics feed a parameter-matched MLP broadcast across
+            horizons, without any attention over token categories.
 
         """
         batch = variables.shape[0]
@@ -137,7 +208,19 @@ class SemanticResidualCalibration(nn.Module):
         queries = sample_context.unsqueeze(1) + self.horizon_embedding
         queries = queries + self.prediction_projection(base_prediction.unsqueeze(-1))
         query_norm = self.query_norm(queries)
-        if numeric_only:
+        if self.semantic_variant == "mlp":
+            if semantic_state is not None or semantic_raw is not None:
+                raise ValueError("mlp residual variant consumes no semantic input")
+            attended = self.numeric_mlp(query_norm)
+        elif self.semantic_variant == "concat":
+            if semantic_raw is None:
+                raise ValueError("concat residual variant requires semantic_raw")
+            if semantic_raw.shape != (batch, 36):
+                raise ValueError("semantic_raw must be [batch, 36]")
+            attended = self.concat_mlp(
+                semantic_raw.to(variables.dtype)
+            ).unsqueeze(1).expand(-1, self.pred_len, -1)
+        elif numeric_only:
             # Self-attention over the numerical queries only; no physical
             # semantic token and no extra parameters are introduced.
             attended, _ = self.cross_attention(
@@ -153,8 +236,11 @@ class SemanticResidualCalibration(nn.Module):
             )
             memory = self.semantic_norm(self.semantic_projection(memory))
             attended, _ = self.cross_attention(
-                query_norm, memory, memory, need_weights=False
+                query_norm.mean(1, keepdim=True) if self.shared_retrieval else query_norm,
+                memory, memory, need_weights=False
             )
+            if self.shared_retrieval:
+                attended = attended.expand(-1, self.pred_len, -1)
         fused = self.fusion(torch.cat([queries, attended, queries * attended], dim=-1))
 
         residual = self.max_correction * torch.tanh(

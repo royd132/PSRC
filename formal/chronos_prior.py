@@ -22,7 +22,6 @@ from pathlib import Path
 
 import numpy as np
 
-from formal.fm_priors import model_revision
 from formal.pc_fra import clip_prior, split_daylight_mask
 
 # Native Chronos-2 quantile grid (pipeline.quantiles), ordered ascending.
@@ -33,6 +32,21 @@ CHRONOS2_QUANTILES: tuple[float, ...] = (
 RECIPE_V4 = "v4"
 BACKEND = "chronos-2"
 MODEL_NAME = "amazon/chronos-2"
+
+
+def model_revision(model_name: str) -> str | None:
+    from huggingface_hub.constants import HF_HUB_CACHE
+
+    ref = (
+        Path(HF_HUB_CACHE)
+        / f"models--{model_name.replace('/', '--')}"
+        / "refs"
+        / "main"
+    )
+    try:
+        return ref.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
 
 # Registered Stage A search space: 4 contexts x 12 readouts = 48 configs.
 STAGE_A_CONTEXTS: tuple[int, ...] = (96, 192, 384, 672)
