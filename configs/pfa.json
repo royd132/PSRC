@@ -1,0 +1,341 @@
+{
+  "seed": 2026,
+  "epochs": 100,
+  "patience": 10,
+  "batch": 128,
+  "ema_decay": 0.98,
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+  "rmse_guard": 1.003,
+  "quarter_mae_guard": 1.005,
+  "stations": {
+    "dkasc_site31": {
+      "numeric": {
+        "prior": {
+          "candidate": "skew_b+0.50",
+          "scale": [
+            "scalar",
+            0.5
+          ]
+        },
+        "lr": 0.0003,
+        "weight_decay": 0.001,
+        "epsilon": 0.06477636098861694,
+        "huber_beta_std": 0.03238818049430847,
+        "lambda_energy": 0.01,
+        "lambda_smooth": 0.01,
+        "hidden": 96,
+        "dropout": 0.1
+      },
+      "reference": {
+        "config": {
+          "lr": 8.999999999999999e-05,
+          "sigma_fraction": 0.234375,
+          "gate": 0.8,
+          "temperature": 0.1,
+          "loss": "harm_aware_mse",
+          "weight_decay": 0.001
+        },
+        "tuning": {
+          "lr": 8.999999999999999e-05,
+          "weight_decay": 0.001,
+          "harm_weight": 0.25,
+          "tail_weight": 0.0,
+          "anchor_weight": 0.0,
+          "epsilon_factor": 1.875,
+          "temperature_factor": 1.0,
+          "language_lr_factor": 1.0,
+          "language_gate": null
+        }
+      },
+      "regime": {
+        "edges": [
+          0.25,
+          0.6
+        ],
+        "scales": [
+          0.5,
+          0.125,
+          1.0
+        ]
+      },
+      "reduction": "mean",
+      "heads": [
+        {
+          "config": {
+            "lr": 0.0015,
+            "sigma_fraction": 0.234375,
+            "gate": 0.8,
+            "temperature": 0.1,
+            "loss": "mae_first",
+            "weight_decay": 0.001
+          },
+          "tuning": {
+            "weight_decay": 0.001,
+            "mse_weight": 0.0,
+            "smooth": 0.0,
+            "bound_factor": 1.0,
+            "language_lr_factor": 1.0,
+            "anchor_weight": 0.01,
+            "lr": 0.0015
+          },
+          "scale": 1.0
+        },
+        {
+          "config": {
+            "lr": 0.001,
+            "sigma_fraction": 0.29296875,
+            "gate": 0.8,
+            "temperature": 0.1,
+            "loss": "mae_first",
+            "weight_decay": 0.001
+          },
+          "tuning": {
+            "weight_decay": 0.001,
+            "mse_weight": 0.0,
+            "smooth": 0.0,
+            "bound_factor": 1.25,
+            "language_lr_factor": 1.0,
+            "anchor_weight": 0.01,
+            "lr": 0.001
+          },
+          "scale": 0.75
+        },
+        {
+          "config": {
+            "lr": 0.001,
+            "sigma_fraction": 0.234375,
+            "gate": 0.8,
+            "temperature": 0.1,
+            "loss": "mae_first",
+            "weight_decay": 0.001
+          },
+          "tuning": {
+            "weight_decay": 0.001,
+            "mse_weight": 0.03,
+            "smooth": 0.0,
+            "bound_factor": 1.0,
+            "language_lr_factor": 1.0,
+            "anchor_weight": 0.01,
+            "lr": 0.001
+          },
+          "scale": 1.0
+        }
+      ]
+    },
+    "dkasc_site1a": {
+      "numeric": {
+        "prior": {
+          "candidate": "mean_q_full",
+          "scale": [
+            "scalar",
+            0.5
+          ]
+        },
+        "lr": 0.0003,
+        "weight_decay": 0.0,
+        "epsilon": 0.20517553389072418,
+        "huber_beta_std": 1.0,
+        "lambda_energy": 0.0,
+        "lambda_smooth": 0.0,
+        "hidden": 96,
+        "dropout": 0.1
+      },
+      "reference": {
+        "config": {
+          "lr": 0.0003,
+          "sigma_fraction": 0.3125,
+          "gate": 0.8,
+          "temperature": 0.1,
+          "loss": "harm_aware_mse",
+          "weight_decay": 0.001
+        },
+        "tuning": {
+          "lr": 0.0003,
+          "weight_decay": 0.001,
+          "harm_weight": 0.25,
+          "tail_weight": 0.0,
+          "anchor_weight": 0.0,
+          "epsilon_factor": 0.625,
+          "temperature_factor": 1.0,
+          "language_lr_factor": 1.0,
+          "language_gate": null
+        }
+      },
+      "regime": {
+        "edges": [],
+        "scales": [
+          1.0
+        ]
+      },
+      "reduction": "mean",
+      "heads": [
+        {
+          "config": {
+            "lr": 0.0003,
+            "sigma_fraction": 0.3125,
+            "gate": 0.8,
+            "temperature": 0.1,
+            "loss": "mae_first",
+            "weight_decay": 0.001
+          },
+          "tuning": {
+            "weight_decay": 0.001,
+            "mse_weight": 0.1,
+            "smooth": 0.0,
+            "bound_factor": 1.0,
+            "language_lr_factor": 1.0,
+            "anchor_weight": 0.01,
+            "lr": 0.0003
+          },
+          "scale": 0.75
+        }
+      ]
+    },
+    "pvod_station02": {
+      "numeric": {
+        "prior": {
+          "candidate": "mean_q_full",
+          "scale": [
+            "scalar",
+            0.5
+          ]
+        },
+        "lr": 0.0003,
+        "weight_decay": 0.0,
+        "epsilon": 0.3190987706184387,
+        "huber_beta_std": 1.0,
+        "lambda_energy": 0.0,
+        "lambda_smooth": 0.0,
+        "hidden": 96,
+        "dropout": 0.1
+      },
+      "reference": {
+        "config": {
+          "lr": 0.0003,
+          "sigma_fraction": 0.46875,
+          "gate": 0.5,
+          "temperature": 0.2,
+          "loss": "harm_aware_mse",
+          "weight_decay": 0.001
+        },
+        "tuning": {
+          "lr": 0.0003,
+          "weight_decay": 0.001,
+          "harm_weight": 0.25,
+          "tail_weight": 0.0,
+          "anchor_weight": 0.0,
+          "epsilon_factor": 1.875,
+          "temperature_factor": 1.0,
+          "language_lr_factor": 1.0,
+          "language_gate": null
+        }
+      },
+      "regime": {
+        "edges": [
+          0.1,
+          0.4,
+          0.7
+        ],
+        "scales": [
+          0.125,
+          0.75,
+          1.0,
+          0.5
+        ]
+      },
+      "reduction": "mean",
+      "heads": [
+        {
+          "config": {
+            "lr": 0.0003,
+            "sigma_fraction": 0.703125,
+            "gate": 0.5,
+            "temperature": 0.2,
+            "loss": "mae_first",
+            "weight_decay": 0.001
+          },
+          "tuning": {
+            "weight_decay": 0.001,
+            "mse_weight": 0.15,
+            "smooth": 0.0,
+            "bound_factor": 1.5,
+            "language_lr_factor": 1.0,
+            "anchor_weight": 0.01,
+            "lr": 0.0003
+          },
+          "scale": 0.5
+        }
+      ]
+    },
+    "hkust": {
+      "numeric": {
+        "prior": {
+          "candidate": "mean_q_full",
+          "scale": [
+            "scalar",
+            0.5
+          ]
+        },
+        "lr": 3e-05,
+        "weight_decay": 0.0,
+        "epsilon": 0.0857892632484436,
+        "huber_beta_std": 1.0,
+        "lambda_energy": 0.0,
+        "lambda_smooth": 0.0,
+        "hidden": 96,
+        "dropout": 0.1
+      },
+      "reference": {
+        "config": {
+          "lr": 0.0003,
+          "sigma_fraction": 1.40625,
+          "gate": 0.8,
+          "temperature": 0.2,
+          "loss": "harm_aware_mse",
+          "weight_decay": 0.001
+        },
+        "tuning": {
+          "lr": 0.0003,
+          "weight_decay": 0.001,
+          "harm_weight": 0.25,
+          "tail_weight": 0.0,
+          "anchor_weight": 0.0,
+          "epsilon_factor": 1.875,
+          "temperature_factor": 1.0,
+          "language_lr_factor": 1.0,
+          "language_gate": null
+        }
+      },
+      "regime": {
+        "edges": [],
+        "scales": [
+          1.0
+        ]
+      },
+      "reduction": "mean",
+      "heads": [
+        {
+          "config": {
+            "lr": 0.0015,
+            "sigma_fraction": 1.40625,
+            "gate": 0.8,
+            "temperature": 0.2,
+            "loss": "mae_first",
+            "weight_decay": 0.001
+          },
+          "tuning": {
+            "weight_decay": 0.001,
+            "mse_weight": 0.0,
+            "smooth": 0.0,
+            "bound_factor": 1.0,
+            "language_lr_factor": 1.0,
+            "anchor_weight": 0.01,
+            "lr": 0.0015
+          },
+          "scale": 0.25
+        }
+      ]
+    }
+  }
+}

@@ -1,89 +1,77 @@
-# PSRC + Frozen Chronos 四站正式对比实验
+# PSRC
 
-仓库只保留已经锁定的正式实验链路。
+光伏功率多步预测的物理状态引导时频框架。公开代码包含时频骨干、多尺度跨变量建模、物理语义残差修正、冻结 Chronos-2 数值适配，以及 Qwen/PFA 状态条件修正。
 
-## 实验规格
+默认设置：15 min 采样，历史 96 步预测未来 16 步（24 h → 4 h）；四站独立训练，时间划分 70% / 15% / 15%，seed 2026。17 个比较模型共用数据窗口和指标实现。
 
-- 站点：DKASC Site31、DKASC Site1A、PVOD Station02、HKUST
-- 分辨率：15 min
-- 任务：`L96 -> H16`（过去 24 h 预测未来 4 h）
-- 划分：按时间顺序 70%/15%/15%，不打乱
-- 训练：100 epoch、patience 10、seed 2026
-- 指标：RMSE、MAE、MSE、R2，使用各站原始目标量纲
-- 输出：`outputs/final_h16/formal_comparison_subset_with_fm.xlsx`
+## 安装
 
-PSRC 参数来自 `configs/best_params.json`。LSTM 和 GRU 使用
-`configs/formal_experiment.json` 中明确记录的敏感性配置，不标作公开默认配置。
+Python 3.10+，先安装适合设备的 PyTorch，再执行：
 
-## 唯一入口
-
-```powershell
+```bash
 python -m pip install -r requirements.txt
+# 使用 Chronos / Qwen 时另装：
+python -m pip install -r requirements-foundation.txt
+```
+
+基础模型首次运行从 Hugging Face 获取。Qwen 固定 revision；建议使用 GPU 提取基础模型特征。核心测试支持 CPU，无需下载大模型。
+
+## 数据
+
+数据不包含在仓库内。默认 CSV 路径在 `configs/formal_experiment.json`：
+
+| 站点标识 | CSV |
+| --- | --- |
+| dkasc_site31 | data/DKASC_site31_15min.csv |
+| dkasc_site1a | data/DKASC_site1a_15min.csv |
+| pvod_station02 | data/PVOD_station02_15min.csv |
+| hkust | data/HKUST_UG_Hall4_15min_causal_physics.csv |
+
+CSV 包含时间列（如 `date`）、功率列 `Target` 和数值型历史协变量。可选 `TargetObserved` 标记真实观测；确定性时间和太阳位置特征参与物理状态构造。按站点整理 15 min 时间轴并保留缺测标记。加载器排除跨断点窗口，标准化统计只由训练段估计。
+
+原始来源：[DKASC](https://www.dkasolarcentre.com.au/download?location=alice-springs)、[PVOD](https://doi.org/10.11922/sciencedb.01094)、[HKUST](https://doi.org/10.5061/dryad.m37pvmd99)。项目标识 `pvod_station02` 对应论文 PVOD02（原始数据 station07）。
+
+## 运行
+
+在仓库根目录执行。先训练骨干及物理修正部分：
+
+```bash
 python run_experiment.py --dry-run
-python run_experiment.py --resume
+python run_experiment.py --station dkasc_site31 --model psrc --resume --require-artifacts
+# 全部四站及比较模型：
+python run_experiment.py --resume --require-artifacts
 ```
 
-已有完整结果时只重建表：
+单站 PFA 流程：
 
-```powershell
-python run_experiment.py --report-only
+```bash
+python -m formal.foundation --station dkasc_site31
+python -m formal.pfa_features --station dkasc_site31 --split train --output outputs/features/dkasc_site31
+python -m formal.pfa_features --station dkasc_site31 --split validation --output outputs/features/dkasc_site31
+python -m formal.pfa train --station dkasc_site31 --features outputs/features/dkasc_site31 --output outputs/pfa/dkasc_site31
+python -m formal.pfa_features --station dkasc_site31 --split test --output outputs/features/dkasc_site31
+python -m formal.pfa predict --station dkasc_site31 --features outputs/features/dkasc_site31 --output outputs/pfa/dkasc_site31
 ```
 
-从锁定流程重建 Frozen Chronos 校正：
+其他站点替换站点名和输出目录。数值状态对照使用 `pfa_features --encoding numeric`，放入独立目录，并在所有分区采用相同编码。必须先准备训练特征，以训练段阈值拟合类别词表。训练命令只读取训练和验证文件。
 
-```powershell
-python run_experiment.py --resume --rebuild-fm
-```
+`configs/pfa.json` 保留最终采用的先验、参考头、修正头和区间参数。`pfa train --reference reference.pt` 可从已有参考头继续 MAE 修正；未指定时按采用配置拟合新的参考头。公开版本省去历史超参搜索、权重和缓存，固定配置重训不等同逐轮重放论文实验，不保证新训练与已报告结果逐位一致。
 
-## 代码边界
+## 代码结构
 
-物理–语言对齐独立实验（冻结原 PSRC+Chronos，GPT-2 六类模板；不覆盖正式结果）：
+- `models/ours.py`：全局／局部时频骨干和物理修正。
+- `layers/`：多尺度、物理 token、残差修正及基线共享层。
+- `formal/data.py`、`engine.py`、`metrics.py`：数据、训练、评估。
+- `formal/chronos_prior.py`、`foundation.py`：Chronos 先验及数值适配。
+- `formal/physical_context.py`、`pfa_features.py`：历史状态、词表与 Qwen 编码。
+- `models/qwen_guidance.py`、`physical_foundation.py`、`formal/pfa.py`：PFA 头、损失和最终读出。
 
-```powershell
-python run_experiment.py --physical-language plan
-python run_experiment.py --physical-language audit
-python run_experiment.py --physical-language prepare
-python run_experiment.py --physical-language train
-```
+张量坐标和训练细节见 [实现说明](docs/implementation.md)。旧调参脚本、过程记录、论文生成脚本、实验输出和权重不属于公开源码。
 
-仅 seed 2026，四站五臂同预算。test 必须另行显式启动；设计与全部命令见
-`docs/physical_language_experiment.md`。
+## 验证
 
-统一的补充证据实验（已知测试集上的后续分析，结果不覆盖正式表）：
-
-```powershell
-python run_experiment.py --evidence-study audit
-python run_experiment.py --evidence-study train --dry-run
-python run_experiment.py --evidence-study all
-```
-
-`all` 依次训练四站的无先验对照、三种 FM 的真实/打乱先验对照（共 28 次）；
-所有验证集锁定完成后才评估 test。可断点续跑，产物在 `outputs/evidence_study_v1`。
-具体协议与现有证据边界见 `docs/evidence_study.md`。
-
-固定架构的先验鲁棒性补充实验（先完成上述 28 组）：
-
-```powershell
-python run_experiment.py --prior-robustness all --dry-run
-python run_experiment.py --prior-robustness all
-```
-
-先用固定 checkpoint 做同状态先验替换诊断，再训练四站的 clean/noise/state
-三组对照（共 12 次，每次完整 100 epoch）。新训练只评估 validation，
-不覆盖正式表。产物在 `outputs/prior_robustness_v2`，详见 `docs/prior_robustness.md`。
-
-- `run_experiment.py`：唯一用户入口
-- `configs/formal_experiment.json`：正式实验与基线参数
-- `configs/best_params.json`：PSRC 锁定参数档案
-- `models/ours.py`：PSRC 主干
-- `models/`：正式表中使用的基线
-- `layers/`：模型共享层
-- `formal/`：数据、训练、Frozen Chronos 校正、指标和表格生成
-- `tests/`：正式链路与接口测试
-
-验证：
-
-```powershell
+```bash
 python -m pytest -q
-python -m compileall -q formal models layers utils run_experiment.py
 ```
+
+测试使用合成数据，覆盖时间划分、模型接口、物理修正、PFA 编码、损失、校准读出和 checkpoint。发布整理时还对照了四站各 128 个已保存样本，PFA 标准化预测最大差异约 `1.9e-7`。

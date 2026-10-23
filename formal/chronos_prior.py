@@ -1,38 +1,26 @@
-"""Chronos-only prior generation for the H16 residual-correction study.
-
-Nothing in this module touches PSRC, the residual adapter, its position,
-the physical semantic tokens, the loss, or the optimizer. It only varies
-HOW the frozen Chronos-2 forecast prior is generated and read out:
-
-* context length          L_C in {96, 192, 384, 672} (PSRC stays L96);
-* input contract          raw PV vs deterministic capacity normalization;
-* distributional readout  median vs quantile-integrated (trimmed/full) mean.
-
-Caches are recipe **v4** (independent files; v3 is never overwritten) and
-store the native 21-quantile grid once, so every readout and the single-
-quantile/segment diagnostics are offline numpy operations - Chronos runs
-exactly once per (context, input_norm) pair.
-"""
-
+"""Frozen Chronos-2 quantile inference, readout, and physical-unit calibration."""
 from __future__ import annotations
 
 import hashlib
+
 import time
+
 from pathlib import Path
 
 import numpy as np
 
 from formal.pc_fra import clip_prior, split_daylight_mask
 
-# Native Chronos-2 quantile grid (pipeline.quantiles), ordered ascending.
 CHRONOS2_QUANTILES: tuple[float, ...] = (
     0.01, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45,
     0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.99,
 )
-RECIPE_V4 = "v4"
-BACKEND = "chronos-2"
-MODEL_NAME = "amazon/chronos-2"
 
+RECIPE_V4 = "v4"
+
+BACKEND = "chronos-2"
+
+MODEL_NAME = "amazon/chronos-2"
 
 def model_revision(model_name: str) -> str | None:
     from huggingface_hub.constants import HF_HUB_CACHE
@@ -48,51 +36,21 @@ def model_revision(model_name: str) -> str | None:
     except OSError:
         return None
 
-# Registered Stage A search space: 4 contexts x 12 readouts = 48 configs.
-STAGE_A_CONTEXTS: tuple[int, ...] = (96, 192, 384, 672)
 READOUT_Q50 = "q50"
+
 READOUT_TRIMMED = "trimmed_mean_q20_q80"
+
 READOUT_FULL_MEAN = "mean_q_full"
+
 TRIM_LOW, TRIM_HIGH = 0.20, 0.80
 
-# Single native-grid quantiles q0.10..q0.90 ARE formal Stage A candidates
-# (offline reads of the cached grid, no extra Chronos inference), named
-# "q0.10" ... "q0.90" to distinguish them from the median alias "q50".
 SINGLE_Q_GRID: tuple[float, ...] = tuple(round(0.1 * k, 1) for k in range(1, 10))
-SINGLE_Q_READOUTS: tuple[str, ...] = tuple(f"q{q:.2f}" for q in SINGLE_Q_GRID)
-STAGE_A_READOUTS: tuple[str, ...] = (
-    SINGLE_Q_READOUTS + (READOUT_Q50, READOUT_TRIMMED, READOUT_FULL_MEAN)
-)
 
-# Diagnostics-only grids (never Stage A selection inputs beyond the 9
-# candidates above): four fixed horizon segments.
-SEGMENT_Q_GRID: tuple[float, ...] = (0.20, 0.35, 0.50, 0.65, 0.80)
+SINGLE_Q_READOUTS: tuple[str, ...] = tuple(f"q{q:.2f}" for q in SINGLE_Q_GRID)
+
 HORIZON_SEGMENTS: tuple[tuple[int, int], ...] = ((0, 4), (4, 8), (8, 12), (12, 16))
 
 INPUT_NORMS: tuple[str, ...] = ("raw", "capacity")
-
-# Strict L96-H16 distribution-shape calibration (context never changes).
-# P* = q50 + beta*(q90 + q10 - 2*q50); beta=0 is exactly the q50 readout.
-SKEW_BETAS: tuple[float, ...] = (-0.50, -0.25, 0.00, 0.25, 0.50)
-# Phase A readouts fixed by the strict-L96 protocol.
-L96_PHASE_A_READOUTS: tuple[str, ...] = (
-    "q0.35", "q0.40", "q0.45",
-    READOUT_Q50, READOUT_TRIMMED, READOUT_FULL_MEAN,
-)
-
-# Disagreement-scale calibration: P' = y_psrc + gamma*(P* - y_psrc).
-SCALE_GAMMAS: tuple[float, ...] = (0.10, 0.25, 0.50, 0.75, 1.00)
-# Two fixed monotonic 4-segment schedules (H1-4 ... H13-16); near horizons
-# trust PSRC more, far horizons let more of the foundation prior through.
-SEGMENT_GAMMA_SCHEDULES: dict[str, tuple[float, ...]] = {
-    "seg_0.10_0.20_0.30_0.40": (0.10, 0.20, 0.30, 0.40),
-    "seg_0.20_0.30_0.40_0.50": (0.20, 0.30, 0.40, 0.50),
-}
-
-DIRECTION_EPS = 1e-6
-
-
-# --- Cache paths ------------------------------------------------------------
 
 def prior_cache_path_v4(
     dataset_path: str | Path,
@@ -109,14 +67,10 @@ def prior_cache_path_v4(
         f"__{input_norm}__prior_{RECIPE_V4}.npz"
     )
 
-
 def valid_starts(starts: np.ndarray, seq_len: int, context_rows: int) -> np.ndarray:
     """Windows whose full Chronos context lies inside the dataset rows."""
     starts = np.asarray(starts, dtype=np.int64)
     return starts[starts + int(seq_len) - int(context_rows) >= 0]
-
-
-# --- Chronos-2 grid cache generation ---------------------------------------
 
 def build_chronos2_grid_cache(
     bundle,
@@ -243,7 +197,6 @@ def build_chronos2_grid_cache(
     )
     return path
 
-
 def load_grid_cache(path: str | Path):
     """Read a v4 cache; returns (starts, q_grid[N,Q,H] float32, metadata)."""
     path = Path(path)
@@ -269,14 +222,10 @@ def load_grid_cache(path: str | Path):
         }
     return starts, q_grid, meta
 
-
-# --- Distributional readouts (pure numpy) -----------------------------------
-
 def _trapz_mean(values: np.ndarray, taus: np.ndarray) -> np.ndarray:
     """Trapezoid integral of Q(tau) divided by the covered tau width."""
     trapz = getattr(np, "trapezoid", None) or getattr(np, "trapz")
     return trapz(values, taus, axis=1) / float(taus[-1] - taus[0])
-
 
 def readout(q_grid: np.ndarray, taus: np.ndarray, name: str) -> np.ndarray:
     """Return one physical-unit prior trajectory [N, H]."""
@@ -297,17 +246,14 @@ def readout(q_grid: np.ndarray, taus: np.ndarray, name: str) -> np.ndarray:
         return readout_quantile(q_grid, taus, float(name[1:]))
     raise ValueError(f"unknown readout {name!r}")
 
-
 def readout_quantile(q_grid: np.ndarray, taus: np.ndarray, q: float) -> np.ndarray:
     levels = [float(t) for t in taus]
     if float(q) not in levels:
         raise ValueError(f"quantile {q} is not on the native grid")
     return q_grid[:, levels.index(float(q)), :].copy()
 
-
 def skew_readout_name(beta: float) -> str:
     return f"skew_b{beta:+.2f}"
-
 
 def skew_readout(q_grid: np.ndarray, taus: np.ndarray, beta: float) -> np.ndarray:
     """Distribution-shape trajectory  P* = q50 + beta*(q90 + q10 - 2*q50).
@@ -322,13 +268,11 @@ def skew_readout(q_grid: np.ndarray, taus: np.ndarray, beta: float) -> np.ndarra
     q90 = readout_quantile(q_grid, taus, 0.90)
     return (q50 + float(beta) * (q90 + q10 - 2.0 * q50)).astype(np.float32)
 
-
 def scale_disagreement(
     prior_phys: np.ndarray, psrc_phys: np.ndarray, gamma: float
 ) -> np.ndarray:
     """P' = y_psrc + gamma*(P* - y_psrc), one scalar strength (L96 only)."""
     return (psrc_phys + float(gamma) * (prior_phys - psrc_phys)).astype(np.float32)
-
 
 def scale_disagreement_segments(
     prior_phys: np.ndarray,
@@ -345,7 +289,6 @@ def scale_disagreement_segments(
         )
     return out
 
-
 def contract_prior(
     prior_phys: np.ndarray,
     bundle,
@@ -359,299 +302,3 @@ def contract_prior(
     for i in range(len(starts)):
         out[i] = clip_prior(prior_phys[i], mask[i].astype(np.float32), bundle.capacity)
     return out
-
-
-# --- Residual information diagnostics ---------------------------------------
-
-def residual_diagnostics(
-    prior_phys: np.ndarray,
-    psrc_phys: np.ndarray,
-    target_phys: np.ndarray,
-    target_sd: float,
-) -> dict[str, object]:
-    """Correlation / OLS coefficient / direction accuracy against residual.
-
-    D = (P_chronos - y_psrc)/sd and R = (y - y_psrc)/sd are the standardized
-    disagreement and the true remaining PSRC residual. All information
-    metrics live in that standardized residual space.
-    """
-    d = ((prior_phys - psrc_phys) / float(target_sd)).reshape(-1)
-    r = ((target_phys - psrc_phys) / float(target_sd)).reshape(-1)
-    d_mean, r_mean = d.mean(), r.mean()
-    dc, rc = d - d_mean, r - r_mean
-    denom = float(np.sqrt(np.sum(dc**2) * np.sum(rc**2)))
-    corr = float(np.sum(dc * rc) / denom) if denom > 0 else float("nan")
-    dd = float(np.sum(d * d))
-    beta = float(np.sum(d * r) / dd) if dd > 0 else float("nan")
-    # R_new = R - beta*D; fraction of residual SSE removed = corr^2.
-    r_sse = float(np.sum(r**2))
-    sse_reduction = float(np.clip(corr**2, 0.0, 1.0))
-    rmse0 = float(np.sqrt(np.mean(r**2)))
-    rmse_after = float(np.sqrt(max(r_sse - dd * beta**2, 0.0) / r.size))
-    usable = np.abs(d) > DIRECTION_EPS
-    if np.any(usable):
-        direction = float(np.mean(np.sign(d[usable]) == np.sign(r[usable])))
-        n_dir = int(np.sum(usable))
-    else:
-        direction, n_dir = float("nan"), 0
-    err = prior_phys.reshape(-1) - target_phys.reshape(-1)
-    scale_ratio = float(np.std(d) / np.std(r)) if np.std(r) > 0 else float("nan")
-    return {
-        "residual_corr": corr,
-        "ols_beta": beta,
-        "residual_sse_reduction": sse_reduction,
-        "psrc_residual_rmse_std": rmse0,
-        "oracle_projected_residual_rmse_std": rmse_after,
-        "direction_accuracy": direction,
-        "direction_n_rows": n_dir,
-        "scale_ratio_kappa": scale_ratio,
-        "prior_rmse_physical": float(np.sqrt(np.mean(err**2))),
-        "prior_mae_physical": float(np.mean(np.abs(err))),
-        "prior_mbe_physical": float(np.mean(err)),
-        "disagreement_mean_std": float(d_mean),
-        "residual_mean_std": float(r_mean),
-    }
-
-
-def per_horizon_corr(
-    prior_phys: np.ndarray,
-    psrc_phys: np.ndarray,
-    target_phys: np.ndarray,
-    target_sd: float,
-) -> list[float]:
-    h = prior_phys.shape[1]
-    out = []
-    for j in range(h):
-        d = (prior_phys[:, j] - psrc_phys[:, j]) / target_sd
-        r = (target_phys[:, j] - psrc_phys[:, j]) / target_sd
-        dc, rc = d - d.mean(), r - r.mean()
-        denom = float(np.sqrt(np.sum(dc**2) * np.sum(rc**2)))
-        out.append(float(np.sum(dc * rc) / denom) if denom > 0 else float("nan"))
-    return out
-
-
-def single_quantile_table(
-    q_grid: np.ndarray,
-    taus: np.ndarray,
-    contract_fn,
-    psrc_phys: np.ndarray,
-    target_phys: np.ndarray,
-    target_sd: float,
-) -> dict[str, dict[str, float]]:
-    """Diagnostic-only: residual corr for q in {0.1,...,0.9}."""
-    table: dict[str, dict[str, float]] = {}
-    for q in SINGLE_Q_GRID:
-        prior = contract_fn(readout_quantile(q_grid, taus, q))
-        diag = residual_diagnostics(prior, psrc_phys, target_phys, target_sd)
-        table[f"q{int(round(q * 100)):02d}"] = {
-            "residual_corr": diag["residual_corr"],
-            "ols_beta": diag["ols_beta"],
-            "direction_accuracy": diag["direction_accuracy"],
-            "prior_rmse_physical": diag["prior_rmse_physical"],
-        }
-    return table
-
-
-def segment_table(
-    q_grid: np.ndarray,
-    taus: np.ndarray,
-    contract_fn,
-    psrc_phys: np.ndarray,
-    target_phys: np.ndarray,
-    target_sd: float,
-) -> list[dict[str, object]]:
-    """Diagnostic-only: best-q search per four fixed horizon segments."""
-    rows = []
-    for k, (lo, hi) in enumerate(HORIZON_SEGMENTS):
-        best = None
-        per_q = {}
-        for q in SEGMENT_Q_GRID:
-            prior = contract_fn(readout_quantile(q_grid, taus, q))
-            d = ((prior - psrc_phys) / target_sd)[:, lo:hi].reshape(-1)
-            r = ((target_phys - psrc_phys) / target_sd)[:, lo:hi].reshape(-1)
-            dc, rc = d - d.mean(), r - r.mean()
-            denom = float(np.sqrt(np.sum(dc**2) * np.sum(rc**2)))
-            corr = float(np.sum(dc * rc) / denom) if denom > 0 else float("nan")
-            per_q[f"q{int(round(q * 100)):02d}"] = corr
-            if best is None or corr > best[1]:
-                best = (q, corr)
-        rows.append(
-            {
-                "segment": f"H{lo + 1}-H{hi}",
-                "best_q": float(best[0]),
-                "best_residual_corr": float(best[1]),
-                "corr_per_q": per_q,
-            }
-        )
-    return rows
-
-
-def pool_diagnostics(
-    per_station: dict[str, dict[str, object]],
-    stations: tuple[str, ...],
-) -> dict[str, object]:
-    """Pool residual information across both dev stations.
-
-    Stations differ in capacity (4.3 vs 15.2 kW), so every pooled error is
-    standardized by the station's target SD before pooling; per-station
-    physical metrics are reported separately by the caller.
-    """
-    ds, rs, es = [], [], []
-    dir_hits, dir_n = 0, 0
-    for station in stations:
-        a = per_station[station]["_arrays"]
-        ds.append(a["d"])
-        rs.append(a["r"])
-        es.append(a["err_std"])
-        dir_hits += a["dir_hits"]
-        dir_n += a["dir_n"]
-    d = np.concatenate(ds)
-    r = np.concatenate(rs)
-    e = np.concatenate(es)
-    dc, rc = d - d.mean(), r - r.mean()
-    denom = float(np.sqrt(np.sum(dc**2) * np.sum(rc**2)))
-    corr = float(np.sum(dc * rc) / denom) if denom > 0 else float("nan")
-    dd = float(np.sum(d * d))
-    beta = float(np.sum(d * r) / dd) if dd > 0 else float("nan")
-    r_sse = float(np.sum(r**2))
-    return {
-        "pooled_residual_corr": corr,
-        "pooled_ols_beta": beta,
-        "pooled_residual_sse_reduction": float(np.clip(corr**2, 0, 1)),
-        "pooled_oracle_residual_rmse_std": float(
-            np.sqrt(max(r_sse - dd * beta**2, 0.0) / r.size)
-        ),
-        "pooled_direction_accuracy": float(dir_hits / max(dir_n, 1)),
-        "pooled_prior_rmse_std": float(np.sqrt(np.mean(e**2))),
-        "pooled_prior_mae_std": float(np.mean(np.abs(e))),
-        "pooled_prior_mbe_std": float(np.mean(e)),
-    }
-
-
-def select_stage_a(rows: list[dict[str, object]]) -> dict[str, object]:
-    """PRIMARY pooled residual corr; SECONDARY direction; TIEBREAK RMSE."""
-    ordered = sorted(
-        rows,
-        key=lambda row: (
-            -float(row["pooled_residual_corr"]),
-            -float(row["pooled_direction_accuracy"]),
-            float(row["pooled_prior_rmse_std"]),
-        ),
-    )
-    best = ordered[0]
-    return {
-        "selection_rule": (
-            "PRIMARY=max pooled residual corr; SECONDARY=max direction "
-            "accuracy; TIEBREAK=min standalone prior RMSE"
-        ),
-        "selected_context_rows": int(best["context_rows"]),
-        "selected_readout": str(best["readout"]),
-        "selected_metrics": {
-            k: v for k, v in best.items()
-            if k in (
-                "pooled_residual_corr", "pooled_direction_accuracy",
-                "pooled_prior_rmse_std", "pooled_ols_beta",
-            )
-        },
-        "ranking": [
-            {
-                "context_rows": int(row["context_rows"]),
-                "readout": str(row["readout"]),
-                "pooled_residual_corr": float(row["pooled_residual_corr"]),
-                "pooled_direction_accuracy": float(
-                    row["pooled_direction_accuracy"]
-                ),
-                "pooled_prior_rmse_std": float(
-                    row["pooled_prior_rmse_std"]
-                ),
-            }
-            for row in ordered
-        ],
-    }
-
-
-def worst_site_table(
-    rows: list[dict[str, object]],
-    stations: tuple[str, ...],
-) -> list[dict[str, object]]:
-    """Rank rows by the WORST station (max-min), never by pooled score.
-
-    Each row must carry ``per_station`` -> station -> residual metrics.
-    Key: max over stations of -rho, then -direction, then |kappa-1|.
-    Ties after that resolve on mean (then min) standalone prior RMSE.
-    """
-    enriched = []
-    for row in rows:
-        per = row["per_station"]
-        corrs = {s: float(per[s]["residual_corr"]) for s in stations}
-        dirs = {s: float(per[s]["direction_accuracy"]) for s in stations}
-        kappas = {s: float(per[s]["scale_ratio_kappa"]) for s in stations}
-        rmses = {s: float(per[s]["prior_rmse_physical"]) for s in stations}
-        enriched.append({
-            **row,
-            "_worst_corr": min(corrs.values()),
-            "_worst_direction": min(dirs.values()),
-            "_worst_kappa_gap": max(abs(k - 1.0) for k in kappas.values()),
-            "_mean_rmse": float(np.mean(list(rmses.values()))),
-        })
-    enriched.sort(
-        key=lambda r: (
-            -r["_worst_corr"],
-            -r["_worst_direction"],
-            r["_worst_kappa_gap"],
-            r["_mean_rmse"],
-        )
-    )
-    return enriched
-
-
-def select_worst_site(
-    rows: list[dict[str, object]],
-    stations: tuple[str, ...],
-    top_k: int = 2,
-) -> dict[str, object]:
-    """Pick top-k candidates whose weakest station is strongest."""
-    ordered = worst_site_table(rows, stations)
-    keep = []
-    for row in ordered[:top_k]:
-        keep.append({
-            "candidate": str(row["candidate"]),
-            "worst_station_residual_corr": row["_worst_corr"],
-            "worst_station_direction_accuracy": row["_worst_direction"],
-            "worst_station_kappa_gap": row["_worst_kappa_gap"],
-            "per_station": {
-                s: {
-                    "residual_corr": float(
-                        row["per_station"][s]["residual_corr"]
-                    ),
-                    "direction_accuracy": float(
-                        row["per_station"][s]["direction_accuracy"]
-                    ),
-                    "scale_ratio_kappa": float(
-                        row["per_station"][s]["scale_ratio_kappa"]
-                    ),
-                    "prior_mbe_physical": float(
-                        row["per_station"][s]["prior_mbe_physical"]
-                    ),
-                }
-                for s in stations
-            },
-        })
-    return {
-        "selection_rule": (
-            "PRIMARY=max over candidates of min over stations corr(D,R); "
-            "SECONDARY=max min-station direction accuracy; "
-            "TIEBREAK=min max-station |kappa-1|"
-        ),
-        "stations": list(stations),
-        "selected": keep,
-        "ranking": [
-            {
-                "candidate": str(r["candidate"]),
-                "worst_station_residual_corr": r["_worst_corr"],
-                "worst_station_direction_accuracy": r["_worst_direction"],
-                "worst_station_kappa_gap": r["_worst_kappa_gap"],
-            }
-            for r in ordered
-        ],
-    }

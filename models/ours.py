@@ -12,7 +12,7 @@ from layers.corpatch import ForecastHead, MultiScaleCorPatchEncoder, MultiScaleV
 from layers.pc_fra import PcFraResidualAdapter, pack_slices, pack_width
 from layers.physical_semantic import PhysicalSemanticEncoder
 from layers.residual_corrector import SemanticResidualCalibration
-from layers.revin import RevIN
+from layers.RevIN import RevIN
 
 
 class SourceGTR(nn.Module):

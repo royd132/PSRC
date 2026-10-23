@@ -57,8 +57,8 @@ class _FakePSRC(nn.Module):
         return corrected.unsqueeze(-1)
 
 
-def test_deterministic_run_persists_dump_without_checkpoint(tmp_path):
-    config = load_experiment_config(ROOT / "configs" / "formal_experiment.json")
+def test_deterministic_run_persists_dump_without_checkpoint(tmp_path, synthetic_config):
+    config = synthetic_config
     job = JobSpec("pvod_station02", "persistence", SEQ_LEN, HORIZON, 2026)
     artifacts = tmp_path / "pvod_persistence"
 
@@ -83,8 +83,8 @@ def test_deterministic_run_persists_dump_without_checkpoint(tmp_path):
     assert not (artifacts / "checkpoint.pt").exists()
 
 
-def test_run_without_artifacts_dir_has_no_artifact_fields():
-    config = load_experiment_config(ROOT / "configs" / "formal_experiment.json")
+def test_run_without_artifacts_dir_has_no_artifact_fields(synthetic_config):
+    config = synthetic_config
     job = JobSpec("pvod_station02", "persistence", SEQ_LEN, HORIZON, 2026)
 
     result = run_job(job, config)

@@ -58,8 +58,8 @@ def test_future_geometry_window_uses_only_future_rows(tmp_path):
 
 
 @pytest.mark.parametrize("model", list(DETERMINISTIC_MODELS))
-def test_deterministic_baselines_run_without_training(model):
-    config = load_experiment_config(ROOT / "configs" / "formal_experiment.json")
+def test_deterministic_baselines_run_without_training(model, synthetic_config):
+    config = synthetic_config
     job = JobSpec("pvod_station02", model, SEQ_LEN, HORIZON, 2026)
 
     result = run_job(job, config)
